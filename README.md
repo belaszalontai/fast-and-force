@@ -1,5 +1,7 @@
 # Fast&Force – TVC és HT-1080Z játékok és demók (forráskódok)
 
+[🇬🇧 English version](README_EN.md)
+
 Ez a gyűjtemény a **Videoton TV Computer (TVC)** és a **HT-1080Z** iskolaszámítógépre írt játékaim és demóim **buildelhető forráskódjait** tartalmazza, évek szerint rendezve.
 
 Minden projekt mellett megtalálhatók a hozzá tartozó asset-ek (ZX7-tel tömörített grafika, zene, táblázatok), és a legtöbb esetben a kész, emulátorban azonnal betölthető `.cas` fájl is.
