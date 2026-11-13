@@ -1,0 +1,900 @@
+;===============================================================================
+; PLAYS converted C64 SID music on HT-1080Z using AY-3-8910 sound chip
+;===============================================================================
+; (c) 2024 by Béla Szalontai (Fast & Force)
+;===============================================================================
+				
+				; HT-1080Z
+				org	17129
+				genbinary
+				
+				call	$01c9			; CLS
+				
+				ld	hl,TITLE_PIC		; a ZX7-el tömörített HTPIC kép címe
+				ld	de,$3c00		; a video memória címe
+				call	ZX7_DECOMPRESS		; kicsomagoljuk egyből a video RAM-ba
+				
+				ld	hl,TITLE_TEXT1		; title text 1
+				ld	de,$3c00+11*64
+				ld	bc,64
+				ldir
+				
+				ld	hl,TITLE_TEXT2		; title text 2
+				ld	de,$3c00+12*64
+				ld	bc,64
+				ldir
+				
+				ld	hl,TITLE_TEXT3		; title text 3
+				ld	de,$3c00+13*64
+				ld	bc,64
+				ldir
+				
+				ld	hl,MUSIC_DATA_ZX7	; átmásoljuk a zx7-el becsomagolt zenét a memória tetejére
+				ld	de,MUSIC_DATA_TEMP
+				ld	bc,MUSIC_DATA_LENGTH
+				ldir
+				
+				ld	hl,MUSIC_DATA_TEMP	; kicsomagoljuk a ZX7-el tömörített zenét
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				
+				call	AY_init
+	demoloop		call	WAITQ			; waits for 20ms programmed
+				call	play_SID_frame
+				jp	demoloop
+				
+; Programmed Waiting
+	WAITQ			
+				ld	BC,800			; ~800 * 40 T state
+	DLY1			dec	BC			; [6]
+				nop				; [4]
+				nop				; [4]
+				nop				; [4]
+				nop				; [4]
+				ld	A,B			; [4]
+				or	C			; [4]
+				jp	NZ,DLY1			; [10]
+				ret
+				
+; init AY chip, enable Tone and set volume to max for all channels
+	AY_init			ld	a,7			; MIXER - R7 = $FF-7 (11111000b)
+				out	($1F),a
+				ld	a,255-7			; enable Tone for all channels
+				out	($1E),a
+				ld	a,8			; R8 - channel A amplitude
+				out	($1F),a
+				ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ld	a,9			; R9 - channel B amplitude
+				out	($1F),a
+				ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ld	a,10			; R10 - channel C amplitude
+				out	($1F),a
+				ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ret
+				
+; PLAYS one frame of converted C64 SID music
+	play_SID_frame		
+; Handling ADSR for channels (only volume release)				
+	CH1_VOL_RELEASE_CNT	ld	bc,256
+				dec	bc
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,CH2_VOL_RELEASE_CNT_B
+	CH1_VOL_RELEASE		ld	bc,256			; reset counter
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH1_VOLUME+1)
+				dec	a			; decrease volume 
+				jp	c,CH2_VOL_RELEASE_CNT_B6
+				ld	(CH1_VOLUME+1),a
+				jp	CH2_VOL_RELEASE_CNT
+				
+	CH2_VOL_RELEASE_CNT_B	jp	CH2_VOL_RELEASE_CNT_B1	; balance 80 T state 
+	CH2_VOL_RELEASE_CNT_B1	jp	CH2_VOL_RELEASE_CNT_B2
+	CH2_VOL_RELEASE_CNT_B2	jp	CH2_VOL_RELEASE_CNT_B3
+	CH2_VOL_RELEASE_CNT_B3	jp	CH2_VOL_RELEASE_CNT_B4
+	CH2_VOL_RELEASE_CNT_B4	jp	CH2_VOL_RELEASE_CNT_B5
+	CH2_VOL_RELEASE_CNT_B5	jp	CH2_VOL_RELEASE_CNT_B6
+	CH2_VOL_RELEASE_CNT_B6	jp	CH2_VOL_RELEASE_CNT_B7
+	CH2_VOL_RELEASE_CNT_B7	jp	CH2_VOL_RELEASE_CNT
+				
+	CH2_VOL_RELEASE_CNT	ld	bc,256
+				dec	bc
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,CH3_VOL_RELEASE_CNT_B
+	CH2_VOL_RELEASE		ld	bc,256			; reset counter
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH2_VOLUME+1)
+				dec	a			; decrease volume 
+				jp	c,CH3_VOL_RELEASE_CNT_B6
+				ld	(CH2_VOLUME+1),a
+				jp	CH3_VOL_RELEASE_CNT
+				
+	CH3_VOL_RELEASE_CNT_B	jp	CH3_VOL_RELEASE_CNT_B1	; balance 80 T state 
+	CH3_VOL_RELEASE_CNT_B1	jp	CH3_VOL_RELEASE_CNT_B2
+	CH3_VOL_RELEASE_CNT_B2	jp	CH3_VOL_RELEASE_CNT_B3
+	CH3_VOL_RELEASE_CNT_B3	jp	CH3_VOL_RELEASE_CNT_B4
+	CH3_VOL_RELEASE_CNT_B4	jp	CH3_VOL_RELEASE_CNT_B5
+	CH3_VOL_RELEASE_CNT_B5	jp	CH3_VOL_RELEASE_CNT_B6
+	CH3_VOL_RELEASE_CNT_B6	jp	CH3_VOL_RELEASE_CNT_B7
+	CH3_VOL_RELEASE_CNT_B7	jp	CH3_VOL_RELEASE_CNT
+				
+	CH3_VOL_RELEASE_CNT	ld	bc,256
+				dec	bc
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,MUSICPOS_B
+	CH3_VOL_RELEASE		ld	bc,256			; reset counter
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH3_VOLUME+1)
+				dec	a			; decrease volume 
+				jp	c,MUSICPOS_B6
+				ld	(CH3_VOLUME+1),a
+				jp	MUSICPOS
+				
+	MUSICPOS_B		jp	MUSICPOS_B1		; balance 80 T state 
+	MUSICPOS_B1		jp	MUSICPOS_B2
+	MUSICPOS_B2		jp	MUSICPOS_B3
+	MUSICPOS_B3		jp	MUSICPOS_B4
+	MUSICPOS_B4		jp	MUSICPOS_B5
+	MUSICPOS_B5		jp	MUSICPOS_B6
+	MUSICPOS_B6		jp	MUSICPOS_B7
+	MUSICPOS_B7		jp	MUSICPOS
+				
+; parse record							
+	MUSICPOS		ld	HL,MUSIC_DATA
+				ld	d,$48			; high address of sound frequency constant lookup table
+	MP_CH1			inc	hl
+				ld	a,(hl)			; load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; first byte can be LOOP control
+				jp	nz,MP_SKIP
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; reset music data pointer
+				ld	(MUSICPOS+1),HL
+				jp	MP_CH1			; restart parsing
+				
+	MP_SKIP			cp	SKIP
+				jp	z,MP_CH2		; SKIP -> skip channel 1
+				cp	FRQINC00
+				jp	c,MP_CH1_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH1_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jp	MP_CH2
+	MP_CH1_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH1_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH1_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jp	MP_CH2
+	MP_CH1_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH1_NEXT3
+				ld	(CH1_VOL_RELEASE+1),bc
+				jp	MP_CH1
+; handle normal musical note on CH1
+	MP_CH1_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; load frequ constant for CH1
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC1+1),BC		; put into CH1 freq constant in irq handler    
+				ld	a,MASTER_VOLUME_CH1	; new sound -> new volume
+				ld	(CH1_VOLUME+1),a
+				ld	bc,(CH1_VOL_RELEASE+1)
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH2			inc	hl
+				ld	a,(hl)
+; check control codes for channel 2
+				cp	SKIP
+				jp	z,MP_CH3		; SKIP -> skip channel 2
+				cp	FRQINC00
+				jp	c,MP_CH2_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH2_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jp	MP_CH3
+	MP_CH2_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH2_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH2_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jp	MP_CH3
+	MP_CH2_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH2_NEXT3
+				ld	(CH2_VOL_RELEASE+1),bc
+				jp	MP_CH2
+; handle normal musical note on CH2
+	MP_CH2_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH2
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC2+1),BC		; put into CH2 freq constant in irq handler     
+				ld	a,MASTER_VOLUME_CH2	; new sound -> new volume
+				ld	(CH2_VOLUME+1),a
+				ld	bc,(CH2_VOL_RELEASE+1)
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH3			inc	hl
+				ld	a,(hl)
+; check control codes for channel 3
+				cp	SKIP
+				jp	z,MP_END		; SKIP -> skip channel 3
+				cp	FRQINC00
+				jp	c,MP_CH3_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH3_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jp	MP_END
+	MP_CH3_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH3_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH3_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				srl	a
+				srl	a
+				srl	a
+				srl	a
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jp	MP_END
+	MP_CH3_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH3_NEXT3
+				ld	(CH3_VOL_RELEASE+1),bc
+				jp	MP_CH3
+; handle normal musical note on CH3
+	MP_CH3_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH3
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC3+1),BC		; put into CH3 freq constant in irq handler    				
+				ld	a,MASTER_VOLUME_CH3	; new sound -> new volume
+				ld	(CH3_VOLUME+1),a
+				ld	bc,(CH3_VOL_RELEASE+1)
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				
+	MP_END			ld	(MUSICPOS+1),HL
+				
+; set AY-3-8910 registers
+	PAC1			ld	hl,0			; freq for channel A
+				xor	a			; R0
+				out	($1F),a
+				ld	a,l			; Channel A Tone Period = HL
+				out	($1E),a
+				ld	a,1			; R1
+				out	($1F),a
+				ld	a,h
+				out	($1E),a
+	PAC2			ld	hl,0			; freq for channel B
+				ld	a,2			; R2
+				out	($1F),a
+				ld	a,l			; Channel B Tone Period = HL
+				out	($1E),a
+				ld	a,3			; R3
+				out	($1F),a
+				ld	a,h
+				out	($1E),a
+	PAC3			ld	hl,0			; freq for channel C
+				ld	a,4			; R4
+				out	($1F),a
+				ld	a,l			; Channel C Tone Period = HL
+				out	($1E),a
+				ld	a,5			; R5
+				out	($1F),a
+				ld	a,h
+				out	($1E),a
+				
+				ld	a,8			; R8 - channel A amplitude
+				out	($1F),a
+	CH1_VOLUME		ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ld	a,9			; R9 - channel A amplitude
+				out	($1F),a
+	CH2_VOLUME		ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ld	a,10			; R10 - channel A amplitude
+				out	($1F),a
+	CH3_VOLUME		ld	a,$0F			; max volume, no envelope
+				out	($1E),a
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; check and set ADSR Release control code
+; INPUT: 	A = control code to be look up
+; OUTPUT: 	BC = VOL RELEASE COUNTER if RELEASE00..RELEASE0F code is found
+; 		Z = 1 if found
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	CHECK_RELEASE_CONTROL	cp	ADSR00
+				jp	nz,MP_CH1_NEXT21
+				ld	bc,1			; ~ 7ms
+				ret
+	MP_CH1_NEXT21		cp	ADSR01
+				jp	nz,MP_CH1_NEXT22
+				ld	bc,1			; ~ 24ms
+				ret
+	MP_CH1_NEXT22		cp	ADSR02
+				jp	nz,MP_CH1_NEXT23
+				ld	bc,1			; ~ 49ms
+				ret
+	MP_CH1_NEXT23		cp	ADSR03
+				jp	nz,MP_CH1_NEXT24
+				ld	bc,1			; ~ 74ms
+				ret
+	MP_CH1_NEXT24		cp	ADSR04
+				jp	nz,MP_CH1_NEXT25
+				ld	bc,1			; ~ 116ms
+				ret
+	MP_CH1_NEXT25		cp	ADSR05
+				jp	nz,MP_CH1_NEXT26
+				ld	bc,1			; ~ 169ms
+				ret
+	MP_CH1_NEXT26		cp	ADSR06
+				jp	nz,MP_CH1_NEXT27
+				ld	bc,1			; ~ 204ms
+				ret
+	MP_CH1_NEXT27		cp	ADSR07
+				jp	nz,MP_CH1_NEXT28
+				ld	bc,1			; ~ 240ms
+				ret
+	MP_CH1_NEXT28		cp	ADSR08
+				jp	nz,MP_CH1_NEXT29
+				ld	bc,2			; ~ 300ms
+				ret
+	MP_CH1_NEXT29		cp	ADSR09
+				jp	nz,MP_CH1_NEXT2A
+				ld	bc,4			; ~ 752ms
+				ret
+	MP_CH1_NEXT2A		cp	ADSR0A
+				jp	nz,MP_CH1_NEXT2B
+				ld	bc,7			; ~ 1501ms
+				ret
+	MP_CH1_NEXT2B		cp	ADSR0B
+				jp	nz,MP_CH1_NEXT2C
+				ld	bc,10			; ~ 2402ms
+				ret
+	MP_CH1_NEXT2C		cp	ADSR0C
+				jp	nz,MP_CH1_NEXT2D
+				ld	bc,28			; ~ 3002ms
+				ret
+	MP_CH1_NEXT2D		cp	ADSR0D
+				jp	nz,MP_CH1_NEXT2E
+				ld	bc,46			; ~ 9001ms
+				ret
+	MP_CH1_NEXT2E		cp	ADSR0E
+				jp	nz,MP_CH1_NEXT2F
+				ld	bc,75			; ~ 15000ms
+				ret
+	MP_CH1_NEXT2F		cp	ADSR0F
+				ret	nz
+				ld	bc,150			; ~ 24001ms
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di				; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS1		; no more bits left?
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jp	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2EV		; no more bits left?
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2OD		; no more bits left?
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jp	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS5		; no more bits left?
+				ccf
+				jp	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jp	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jp	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jp	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jp	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				ret
+				
+; tone period lookup table for AY-3-8910
+				org	$4800
+				
+				dw	3338			; 32.7 Hz	C1
+				dw	3151			; 34.65 Hz	CISZ1
+				dw	2974			; 36.71 Hz	D1
+				dw	2807			; 38.89 Hz	DISZ1
+				dw	2650			; 41.2 Hz	E1
+				dw	2501			; 43.65 Hz	F1
+				dw	2360			; 46.25 Hz	FISZ1
+				dw	2228			; 49 Hz	G1
+				dw	2103			; 51.91 Hz	GISZ1
+				dw	1985			; 55 Hz	A1
+				dw	1873			; 58.27 Hz	AISZ1
+				dw	1768			; 61.74 Hz	B1
+				dw	1669			; 65.41 Hz	C2
+				dw	1575			; 69.3 Hz	CISZ2
+				dw	1487			; 73.42 Hz	D2
+				dw	1404			; 77.78 Hz	DISZ2
+				dw	1325			; 82.41 Hz	E2
+				dw	1250			; 87.31 Hz	F2
+				dw	1180			; 92.5 Hz	FISZ2
+				dw	1114			; 98 Hz	G2
+				dw	1051			; 103.83 Hz	GISZ2
+				dw	992			; 110 Hz	A2
+				dw	937			; 116.54 Hz	AISZ2
+				dw	884			; 123.47 Hz	B2
+				dw	835			; 130.81 Hz	C3
+				dw	788			; 138.59 Hz	CISZ3
+				dw	743			; 146.83 Hz	D3
+				dw	702			; 155.56 Hz	DISZ3
+				dw	662			; 164.81 Hz	E3
+				dw	625			; 174.61 Hz	F3
+				dw	590			; 185 Hz	FISZ3
+				dw	557			; 196 Hz	G3
+				dw	526			; 207.65 Hz	GISZ3
+				dw	496			; 220 Hz	A3
+				dw	468			; 233.08 Hz	AISZ3
+				dw	442			; 246.94 Hz	B3
+				dw	417			; 261.63 Hz	C4
+				dw	394			; 277.18 Hz	CISZ4
+				dw	372			; 293.66 Hz	D4
+				dw	351			; 311.13 Hz	DISZ4
+				dw	331			; 329.63 Hz	E4
+				dw	313			; 349.23 Hz	F4
+				dw	295			; 369.99 Hz	FISZ4
+				dw	278			; 392 Hz	G4
+				dw	263			; 415.3 Hz	GISZ4
+				dw	248			; 440 Hz	A4
+				dw	234			; 466.16 Hz	AISZ4
+				dw	221			; 493.88 Hz	B4
+				dw	209			; 523.25 Hz	C5
+				dw	197			; 554.37 Hz	CISZ5
+				dw	186			; 587.33 Hz	D5
+				dw	175			; 622.25 Hz	DISZ5
+				dw	166			; 659.25 Hz	E5
+				dw	156			; 698.46 Hz	F5
+				dw	148			; 739.99 Hz	FISZ5
+				dw	139			; 783.99 Hz	G5
+				dw	131			; 830.61 Hz	GISZ5
+				dw	124			; 880 Hz	A5
+				dw	117			; 932.33 Hz	AISZ5
+				dw	111			; 987.77 Hz	B5
+				dw	104			; 1046.5 Hz	C6
+				dw	98			; 1108.73 Hz	CISZ6
+				dw	93			; 1174.66 Hz	D6
+				dw	88			; 1244.51 Hz	DISZ6
+				dw	83			; 1318.51 Hz	E6
+				dw	78			; 1396.91 Hz	F6
+				dw	74			; 1479.98 Hz	FISZ6
+				dw	70			; 1567.98 Hz	G6
+				dw	66			; 1661.22 Hz	GISZ6
+				dw	62			; 1760 Hz	A6
+				dw	59			; 1864.66 Hz	AISZ6
+				dw	55			; 1975.53 Hz	B6
+				dw	52			; 2093 Hz	C7
+				dw	49			; 2217.46 Hz	CISZ7
+				dw	46			; 2349.32 Hz	D7
+				dw	44			; 2489.02 Hz	DISZ7
+				dw	41			; 2637.02 Hz	E7
+				dw	39			; 2793.83 Hz	F7
+				dw	37			; 2959.96 Hz	FISZ7
+				dw	35			; 3135.96 Hz	G7
+				dw	33			; 3322.44 Hz	GISZ7
+				dw	31			; 3520 Hz	A7
+				dw	29			; 3729.31 Hz	AISZ7
+				dw	28			; 3951.07 Hz	B7
+				dw	26			; 4186.01 Hz	C8
+; definition of tones
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	64
+	E6			equ	65
+	F6			equ	66
+	FISZ6			equ	67
+	G6			equ	68
+	GISZ6			equ	69
+	A6			equ	70
+	AISZ6			equ	71
+	B6			equ	72
+				
+	C7			equ	73
+	CISZ7			equ	74
+	D7			equ	75
+	DISZ7			equ	76
+	E7			equ	77
+	F7			equ	78
+	FISZ7			equ	79
+	G7			equ	80
+	GISZ7			equ	81
+	A7			equ	82
+	AISZ7			equ	83
+	B7			equ	84
+				
+	C8			equ	85
+				
+; definition of control codes	
+	MUTE			equ	86			; 0 Hz	channel is muted
+	FRQDEC00		equ	87			; increase freq const by 256
+	FRQDEC01		equ	88			; increase freq const by 16
+	FRQDEC02		equ	89			; increase freq const by 32
+	FRQDEC03		equ	90			; increase freq const by 48
+	FRQDEC04		equ	91			; increase freq const by 64
+	FRQDEC05		equ	92			; increase freq const by 80
+	FRQDEC06		equ	93			; increase freq const by 96
+	FRQDEC07		equ	94			; increase freq const by 112
+	FRQDEC08		equ	95			; increase freq const by 128
+	FRQDEC09		equ	96			; increase freq const by 144
+	FRQDEC0A		equ	97			; increase freq const by 160
+	FRQDEC0B		equ	98			; increase freq const by 176
+	FRQDEC0C		equ	99			; increase freq const by 192
+	FRQDEC0D		equ	100			; increase freq const by 208
+	FRQDEC0E		equ	101			; increase freq const by 224
+	FRQDEC0F		equ	102			; increase freq const by 240
+	FRQINC00		equ	103			; decrease freq const by 256
+	FRQINC01		equ	104			; decrease freq const by 16
+	FRQINC02		equ	105			; decrease freq const by 32
+	FRQINC03		equ	106			; decrease freq const by 48
+	FRQINC04		equ	107			; decrease freq const by 64
+	FRQINC05		equ	108			; decrease freq const by 80
+	FRQINC06		equ	109			; decrease freq const by 96
+	FRQINC07		equ	110			; decrease freq const by 112
+	FRQINC08		equ	111			; decrease freq const by 128
+	FRQINC09		equ	112			; decrease freq const by 144
+	FRQINC0A		equ	113			; decrease freq const by 160
+	FRQINC0B		equ	114			; decrease freq const by 176
+	FRQINC0C		equ	115			; decrease freq const by 192
+	FRQINC0D		equ	116			; decrease freq const by 208
+	FRQINC0E		equ	117			; decrease freq const by 224
+	FRQINC0F		equ	118			; decrease freq const by 240
+	ADSR00			equ	119			; volume ADSR 0 
+	ADSR01			equ	120			; volume ADSR 1	
+	ADSR02			equ	121			; volume ADSR 2
+	ADSR03			equ	122			; volume ADSR 3
+	ADSR04			equ	123			; volume ADSR 4
+	ADSR05			equ	124			; volume ADSR 5
+	ADSR06			equ	125			; volume ADSR 6
+	ADSR07			equ	126			; volume ADSR 7
+	ADSR08			equ	127			; volume ADSR 8
+	ADSR09			equ	128			; volume ADSR 9
+	ADSR0A			equ	129			; volume ADSR 10
+	ADSR0B			equ	130			; volume ADSR 11
+	ADSR0C			equ	131			; volume ADSR 12
+	ADSR0D			equ	132			; volume ADSR 13
+	ADSR0E			equ	133			; volume ADSR 14
+	ADSR0F			equ	134			; volume ADSR 15
+				
+	FINISH			equ	$fd			; finish music, stop playing
+	SKIP			equ	$fe			; channel is skipped (previous sound continues)				
+	LOOP			equ	$ff			; loop entire music	
+				
+	MASTER_VOLUME_CH1	equ	$0f
+	MASTER_VOLUME_CH2	equ	$0f
+	MASTER_VOLUME_CH3	equ	$0f
+				
+	MUSIC_DATA		nop				; decompressed music start address		
+				
+; data
+	TITLE_PIC		incbin	"title_pic2.htpic.zx7"	; ZX7 converted from 1024 to 236 bytes!
+				;;;;;;;;"0123456789012345678901234567890123456789012345678901234567890123"
+	TITLE_TEXT1		db	"HARDWARE BASED SID PLAYER USING AY-3-8910 SOUND CHIP OF HT-1080Z"
+	TITLE_TEXT2		db	"ONLY SQUARE WAVE, FREQUENCY TRANSFORMATION AND ADSR RELEASE IS  "
+	TITLE_TEXT3		db	"IMPLEMENTED.   Music: Comic_Bakery.sid    (C) 2024 by Fast&Force"
+				
+				
+; MUSIC DATA RECORDS
+	MUSIC_DATA_ZX7		incbin	"Comic_Bakery.sid.bin.zx7"; ZX7 converted from 29297 to 4171 bytes!
+				db	LOOP			; LOOPMUSIC    				
+				
+	MUSIC_DATA_TEMP		equ	65535-4171
+	MUSIC_DATA_LENGTH	equ	4171
+				
+				nop
+				end

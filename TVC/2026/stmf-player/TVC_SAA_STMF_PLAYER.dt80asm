@@ -1,0 +1,1624 @@
+; ===========================================================================
+; TVC SAA1099 .STMF Player v1.1 (build: 2026-08-18 18:00)
+; Platform: Videoton TVC
+; CPU: Z80 @ 3.125 MHz
+; Output: SAA1099 on Ports $22/$23
+; (C) 2026 by Fast&Force
+; ===========================================================================
+				
+				org	$19EF			; TVC program start address (6639)
+				
+; --- BASIC Header ---
+				db	$0F,$0A,$0,$DD		; "10 PRINT"
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659" ($1A03)
+				db	$95,$FF			; ")"
+				db	0,0,0,0,0		; Padding
+				
+				jp	MAIN			; Entry Point
+				
+; ===========================================================================
+; --- Hardware Definitions ---
+	SAA_ADDR_PORT		equ	$23
+	SAA_DATA_PORT		equ	$22
+				
+; --- Variables ---
+	VAR_GLOBAL_SPEED:	db	6
+	VAR_CUR_TICK:		db	1
+	VAR_POS_ROWS_LEFT:	db	1			; Force reload on first frame
+	VAR_POS_PTR:		dw	0			; Pointer to current Position Block
+	VAR_PATS_PTR:		dw	0			; Pointer to Pattern Pointer List
+	VAR_MUSIC_BASE:		dw	0
+	VAR_SAA_OCTAVES:	ds	3			; Shadow for Reg $10, $11, $12
+	VAR_SAA_FREQ_EN:	db	0			; Shadow for Reg $14
+	VAR_SAA_NOISE_EN:	db	0			; Shadow for Noise Enable bits
+	VAR_SAA_NOISE_FREQ:	db	0			; Shadow for Reg $16 (Noise Freq Control)
+	VAR_CH_IDX:		db	0			; Current channel index for ProcessSample
+	VAR_EG0_SHAPE:		db	0			; Saved EG0 ($18) shape
+	VAR_EG1_SHAPE:		db	0			; Saved EG1 ($19) shape
+	VAR_TEMP_NOTE:		db	0			; Previous note for Glissando init
+				
+; ===========================================================================
+; Channel Structure Definition
+; ===========================================================================
+	CH_STRUCT_SIZE		equ	37
+				
+; --- Playback Control ---
+	O_PTR_L			equ	0			; Current Pattern Data Pointer L
+	O_PTR_H			equ	1			; Current Pattern Data Pointer H
+	O_WAIT			equ	2			; Rows to wait
+	O_NOTE			equ	3			; Current Note Index (1-96)
+				
+; --- Instrument Status ---
+	O_SAMP_NUM		equ	4			; Current Sample ID
+	O_ORN_NUM		equ	5			; Current Ornament ID
+	O_VOL_L			equ	6			; Current Calculated Volume Left (0-15)
+	O_VOL_R			equ	7			; Current Calculated Volume Right (0-15)
+				
+; --- Commands & Data ---
+	O_CMD			equ	8			; Current Command ID
+	O_CMD_DAT		equ	9			; Command Data (8-bit standard)
+	O_CMD_DAT16		equ	10			; Command Data (16-bit for Break/Slide) - LOW BYTE
+	O_CMD_DAT16_H		equ	11			; Command Data (16-bit) - HIGH BYTE
+				
+; --- Sample & Ornament Engine Pointers ---
+	O_SAMP_PTR_L		equ	12			; Pointer to Sample Data L
+	O_SAMP_PTR_H		equ	13			; Pointer to Sample Data H
+	O_ORN_PTR_L		equ	14			; Pointer to Ornament Data L
+	O_ORN_PTR_H		equ	15			; Pointer to Ornament Data H
+				
+; --- Engine Counters ---
+	O_RELEASED		equ	16			; Released flag (1 = in release phase)
+	O_CMD_PHASE		equ	17			; Portamento/Glissando phase counter
+				
+; --- Frequency Modifications ---
+	O_POS_TRANSPOSE		equ	18			; Base Transpose from Position List (Signed Byte)
+	O_FREQ_OFFSET_L		equ	19			; Fine frequency offset (Vibrato/Slide) L
+	O_FREQ_OFFSET_H		equ	20			; Fine frequency offset (Vibrato/Slide) H
+				
+; --- Flags & Internal ---
+	O_FLAGS			equ	21			; General flags (bit0=tone enable, bit1=noise enable)
+				
+; --- Ornament ---
+	O_ORN_OFFSET		equ	22
+				
+	O_SAMP_BASE_L		equ	23			; Base pointer to Sample Data L
+	O_SAMP_BASE_H		equ	24			; Base pointer to Sample Data H
+	O_ORN_BASE_L		equ	25			; Base pointer to Ornament Data L
+	O_ORN_BASE_H		equ	26
+				
+	O_PAT_VOL_L		equ	27			; Saved Pattern Volume L
+	O_PAT_VOL_R		equ	28			; Saved Pattern Volume R
+				
+	O_ACT_NOTE		equ	29			; Last calculated pitch for decay
+	O_NOTE_TRIG		equ	30			; Flag for envelope retrigger
+	O_RELEASABLE		equ	31			; Flag: sample has release section ($FF marker)
+	O_CMD_SHIFT_L		equ	32			; Fine pitch shift from command (L)
+	O_CMD_SHIFT_H		equ	33			; Fine pitch shift from command (H)
+	O_GLISS_NOTE		equ	34			; Glissando target note
+	O_GLISS_TGT_L		equ	35			; Glissando target word L
+	O_GLISS_TGT_H		equ	36			; Glissando target word H
+				
+	CH_DATA:		ds	6 * CH_STRUCT_SIZE
+				
+; ===========================================================================
+; Main Entry
+; ===========================================================================
+	MAIN:			
+				di
+				call	ResetSAA
+				
+; -- 1. Setup Base Pointers --
+				ld	hl,SONG_DATA
+				ld	(VAR_MUSIC_BASE),hl
+				
+; Get Pattern List Pointer (Offset 9)
+				ld	de,9
+				add	hl,de
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_PATS_PTR),hl
+				
+; Get Position Data Pointer (Offset 11)
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	de,11
+				add	hl,de
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				
+; -- 2. Initialize Variables --
+				ld	a,1
+				ld	(VAR_POS_ROWS_LEFT),a
+				ld	(VAR_CUR_TICK),a
+				
+; Clear Channels
+				ld	hl,CH_DATA
+				ld	b,6 * CH_STRUCT_SIZE
+				xor	a
+	FillChannelMem:		
+				ld	(hl),a
+				inc	hl
+				djnz	FillChannelMem
+				
+				ld	ix,CH_DATA
+				ld	de,CH_STRUCT_SIZE
+				ld	b,6
+	InitVols:		
+				ld	(ix+O_PAT_VOL_L),0	; Default L attenuation = 0
+				ld	(ix+O_PAT_VOL_R),0	; Default R attenuation = 0
+				add	ix,de
+				djnz	InitVols
+				
+				ei
+				
+; ===========================================================================
+; Main Loop
+; ===========================================================================
+	PlayerLoop:		
+				halt				; wait for 50Hz interrupt
+				call	PlayFrame
+				jp	PlayerLoop
+				
+; ===========================================================================
+; PlayFrame
+; ===========================================================================
+	PlayFrame:		
+				ld	a,(VAR_CUR_TICK)
+				dec	a
+				ld	(VAR_CUR_TICK),a
+				jr	nz,UpdateEffects
+				
+; --- New Row Logic ---
+				ld	hl,VAR_POS_ROWS_LEFT
+				dec	(hl)
+				jr	nz,SamePosition
+				
+				call	UpdatePosition
+				
+	SamePosition:		
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	(VAR_CUR_TICK),a
+				
+				call	ProcessRow
+				
+	UpdateEffects:		
+				call	ProcessEffects
+				call	UpdateSAA_Registers
+				
+				ret
+				
+; ===========================================================================
+; UpdatePosition
+; ===========================================================================
+	UpdatePosition:		
+				ld	hl,(VAR_POS_PTR)
+				
+; Read Length (Byte 0)
+				ld	a,(hl)
+				or	a
+				jr	z,HandlePosLoop
+				
+				ld	(VAR_POS_ROWS_LEFT),a
+				inc	hl
+				
+; Read Speed (Byte 1)
+				ld	a,(hl)
+				ld	(VAR_GLOBAL_SPEED),a
+				inc	hl
+				
+				call	ReloadPatterns
+				
+; Advance Position Pointer by 14 bytes (2 header + 6*2 channel data)
+				ld	hl,(VAR_POS_PTR)
+				ld	de,14
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				ret
+				
+	HandlePosLoop:		
+				inc	hl
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				
+				ld	a,d
+				or	e
+				jr	z,StopMusic
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				jp	UpdatePosition
+				
+	StopMusic:		
+				ld	a,64
+				ld	(VAR_POS_ROWS_LEFT),a
+				ret
+				
+; ===========================================================================
+; ReloadPatterns
+; ===========================================================================
+	ReloadPatterns:		
+				ld	ix,CH_DATA
+				ld	b,6
+				
+	PatLoop:		
+				push	hl
+				
+				ld	a,(hl)			; Pattern Number (1-based; 0 = no pattern)
+				inc	hl
+				ld	c,(hl)			; Transpose (signed byte)
+				
+				or	a			; Check for 0 = no pattern
+				jr	z,EmptyPat		; If 0, skip to EmptyPat
+				
+				ld	l,a
+				ld	h,0
+				add	hl,hl			; x2 (entry is a WORD)
+				ld	de,(VAR_PATS_PTR)
+				add	hl,de			; HL = address of pattern pointer
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = offset of pattern data
+				
+				ld	a,d
+				or	e
+				jr	z,EmptyPat
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute address
+				jr	SavePatPtr
+				
+	EmptyPat:		
+				ld	hl,0
+				
+	SavePatPtr:		
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				ld	(ix+O_WAIT),0
+				ld	(ix+O_POS_TRANSPOSE),c
+				
+				pop	hl
+				inc	hl
+				inc	hl
+				
+				ld	de,CH_STRUCT_SIZE
+				add	ix,de
+				djnz	PatLoop
+				ret
+				
+; ===========================================================================
+; ProcessRow
+; ===========================================================================
+	ProcessRow:		
+				ld	ix,CH_DATA
+				ld	b,6
+				
+	RowLoop:		
+				push	bc
+				
+				ld	a,(ix+O_WAIT)
+				or	a
+				jr	z,FetchNext
+				dec	(ix+O_WAIT)
+				jp	NextRowCh
+				
+	FetchNext:		
+				ld	l,(ix+O_PTR_L)
+				ld	h,(ix+O_PTR_H)
+				ld	a,h
+				or	l
+				jp	z,NextRowCh
+				
+				ld	a,(hl)
+				inc	hl
+				
+				bit	7,a
+				jr	z,HandleNote
+				
+; --- RLE / End ---
+				and	$7F
+				cp	127
+				jr	z,PatternEnd
+				
+				ld	(ix+O_WAIT),a		; Wait counter saved as-is
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				jp	NextRowCh
+				
+	PatternEnd:		
+				ld	(ix+O_PTR_L),0
+				ld	(ix+O_PTR_H),0
+				jp	NextRowCh
+				
+	HandleNote:		
+				or	a
+				jr	z,HandleFlags
+				
+				cp	$7f			; 127 = Release
+				jr	z,HandleRelease
+				
+				cp	97			; 97 = Tie (Sustain)
+				jr	z,HandleFlags		; Ignore, do not rewind pointers
+				
+				cp	98			; Invalid notes
+				jr	nc,HandleFlags
+				
+				push	af			; Save new note
+				ld	a,(ix+O_NOTE)
+				ld	(VAR_TEMP_NOTE),a	; Save old note for glissando
+				pop	af			; Restore new note
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_NOTE_TRIG),1	; Set trigger for envelope
+				ld	(ix+O_RELEASED),0	; Clear release flag
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_CMD_PHASE),0
+				ld	e,(ix+O_SAMP_BASE_L)
+				ld	d,(ix+O_SAMP_BASE_H)
+				ld	(ix+O_SAMP_PTR_L),e
+				ld	(ix+O_SAMP_PTR_H),d
+				
+				ld	e,(ix+O_ORN_BASE_L)
+				ld	d,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),e
+				ld	(ix+O_ORN_PTR_H),d
+				
+				jr	HandleFlags
+				
+	HandleRelease:		
+				ld	a,(ix+O_RELEASABLE)
+				or	a
+				jr	z,HardRelease		; Not releasable: hard stop
+				ld	a,(ix+O_RELEASED)
+				or	a
+				jr	nz,HardRelease		; Already released: hard stop
+				; Soft release: switch to release section of sample
+				ld	(ix+O_RELEASED),1
+				jp	HandleFlags
+	HardRelease:		
+				xor	a
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_SAMP_PTR_L),a	; Null ptr: ProcessSample silences channel
+				ld	(ix+O_SAMP_PTR_H),a
+				
+	HandleFlags:		
+				ld	b,0
+				ld	a,(hl)
+				inc	hl
+				ld	c,a
+				
+; Sample
+				and	$1F
+				jr	z,CheckN
+				ld	(ix+O_SAMP_NUM),a
+				ld	(ix+O_NOTE_TRIG),1	; Trigger envelope on instrument change
+				call	LoadSamplePtr
+				
+	CheckN:			
+				bit	5,c			; Bit 5: If 1, skip reading Cmd+Orn byte
+				jr	nz,SkipCmdOrn
+				
+; Read Byte 3 (Cmd + Orn)
+				ld	a,(hl)
+				inc	hl
+				ld	d,a
+				
+; Ornament
+				and	$0F
+				jr	z,CheckCmd
+				
+				ld	(ix+O_ORN_NUM),a
+				call	LoadOrnPtr
+				
+	CheckCmd:		
+				ld	a,d
+				and	$F0
+				jr	z,ClearCmd
+				rrca
+				rrca
+				rrca
+				rrca
+				ld	b,a			; Save new command to B
+				ld	(ix+O_CMD),a
+				cp	$03
+				call	z,GlissandoInit
+				jr	CheckP
+				
+	SkipCmdOrn:						; N-flag set: Cmd+Orn byte omitted, previous command state preserved.
+				jr	CheckP
+				
+	ClearCmd:		
+				ld	(ix+O_CMD),0
+				
+	CheckP:			
+				bit	6,c			; Bit 6: If 1, clear Ornament (orn_release)
+				jr	z,CheckV
+				xor	a
+				ld	(ix+O_ORN_NUM),a
+				ld	(ix+O_ORN_OFFSET),a
+				call	LoadOrnPtr		; Reset orn pointer to orn[0] (clear stale ptr, JS: pp.orn=ornaments[0])
+; If active command is ornament-specific (cmd=6 or cmd=7), clear it too.
+; These commands directly manipulate the ornament; keeping them active after
+; orn_release would cause them to run on ornaments[0] (empty ornament).
+				ld	a,(ix+O_CMD)
+				cp	$06
+				jr	z,ClearOrnCmd
+				cp	$07
+				jr	nz,CheckV
+	ClearOrnCmd:		
+				xor	a
+				ld	(ix+O_CMD),a
+				ld	(ix+O_CMD_DAT),a
+				
+	CheckV:			
+				bit	7,c			; Bit 7: If 1, read Volume byte
+				jr	z,CheckCmdData
+				
+; Read Volume Byte
+				ld	a,(hl)
+				inc	hl
+				ld	e,a
+				and	$0F
+				xor	$0F
+				ld	(ix+O_PAT_VOL_L),a
+				ld	a,e
+				rrca
+				rrca
+				rrca
+				rrca
+				and	$0F
+				xor	$0F
+				ld	(ix+O_PAT_VOL_R),a
+				
+	CheckCmdData:		
+; ONLY read command data if a NEW command was declared in this row (B > 0)
+				ld	a,b
+				or	a
+				jr	z,SaveRowPtr
+				
+				cp	$0B			; Break command takes 16-bit data
+				jr	z,CmdWord
+				
+; Read 8-bit command data
+				ld	a,(hl)
+				inc	hl
+				ld	(ix+O_CMD_DAT),a
+				jr	SaveRowPtr
+				
+	CmdWord:		
+; Read 16-bit command data
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				inc	hl
+				ld	(ix+O_CMD_DAT16),e
+				ld	(ix+O_CMD_DAT16_H),d
+				
+	SaveRowPtr:		
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				
+	NextRowCh:		
+				ld	de,CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	b
+				jp	nz,RowLoop
+				ret
+				
+; ===========================================================================
+; Helper: Load Sample Pointer
+; ===========================================================================
+	LoadSamplePtr:		
+				push	hl
+				push	bc
+				push	de
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	bc,5
+				add	hl,bc
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = Sample List offset
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute Sample List address
+				
+				ld	a,(ix+O_SAMP_NUM)
+				; Pointer list already contains sample[0] as the empty sample entry.
+				
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				add	hl,de			; HL += SAMP_NUM * 2
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = sample data offset
+				
+; Empty sample check: offset $0000 means no data
+				ld	a,d
+				or	e
+				jr	z,SmpEmpty		; Zero offset: no sample data
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute sample data address
+				
+; Check for releasable sample marker ($FF only; $80 = end-of-sample ctrl byte)
+				ld	(ix+O_RELEASABLE),0	; Default: not releasable
+				ld	a,(hl)
+				cp	$FF
+				jr	nz,NoSmpRel
+				ld	(ix+O_RELEASABLE),1	; Releasable sample detected
+				inc	hl			; Skip $FF marker
+	NoSmpRel:		
+				jr	SmpSave
+				
+	SmpEmpty:		
+				ld	(ix+O_RELEASABLE),0	; Empty sample: not releasable
+				ld	hl,0			; Set pointer explicitly to 0
+				
+	SmpSave:		
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ld	(ix+O_SAMP_BASE_L),l
+				ld	(ix+O_SAMP_BASE_H),h
+				ld	(ix+O_RELEASED),0	; Clear released flag on sample load
+				
+				pop	de
+				pop	bc
+				pop	hl
+				ret
+				
+; ===========================================================================
+; Helper: Load Ornament Pointer
+; ===========================================================================
+	LoadOrnPtr:		
+				push	hl
+				push	bc
+				push	de
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	bc,7
+				add	hl,bc
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = Ornament List offset
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute Ornament List address
+				
+				ld	a,(ix+O_ORN_NUM)
+				; Pointer list already contains ornament[0] as the empty ornament entry.
+				
+				
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				add	hl,de			; HL += ORN_NUM * 2
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = ornament data offset
+				
+; Empty ornament check: offset $0000 means no data
+				ld	a,d
+				or	e
+				jr	z,OrnEmpty		; Zero offset: no ornament data
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute ornament data address
+				jr	OrnSave
+				
+	OrnEmpty:		
+				ld	hl,0			; Set pointer explicitly to 0
+				
+	OrnSave:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_ORN_BASE_L),l
+				ld	(ix+O_ORN_BASE_H),h
+				
+				pop	de
+				pop	bc
+				pop	hl
+				ret
+				
+; ===========================================================================
+; ProcessEffects
+; ===========================================================================
+	ProcessEffects:		
+				xor	a
+				ld	(VAR_SAA_NOISE_FREQ),a
+				ld	ix,CH_DATA
+				ld	de,5 * CH_STRUCT_SIZE
+				add	ix,de
+				ld	b,6
+				ld	c,5
+	FxLoop:			
+				ld	a,c
+				ld	(VAR_CH_IDX),a
+				
+				push	bc
+				
+				ld	a,(ix+O_CMD)
+				or	a
+				call	nz,RunCommand
+				
+				call	ProcessSample
+				call	ProcessOrnament
+				
+				ld	de,$FFDB		; -CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	c
+				djnz	FxLoop
+				ret
+				
+; ===========================================================================
+; Run Command
+; ===========================================================================
+	RunCommand:		
+				cp	$01			; Portamento Up
+				jp	z,CmdPortamento
+				cp	$02			; Portamento Down
+				jp	z,CmdPortamento
+				cp	$03			; Glissando
+				jp	z,CmdGlissando
+				cp	$08			; Delay Sample
+				jp	z,CmdDelaySample
+				cp	$0F
+				jr	z,CmdSpeed
+				cp	$0B
+				jr	z,CmdBreak
+				cp	$0E			; Check Envelope command
+				jr	z,CmdEnv
+				cp	$06			; Delay Ornament
+				jr	z,CmdDelayOrn
+				cp	$07			; Set Ornament Offset
+				jp	z,CmdOrnOffset
+				ret
+				
+	CmdSpeed:		
+				ld	a,(ix+O_CMD_DAT)
+				; No masking: full byte stored (supports swing speed >= $20)
+				ld	(VAR_GLOBAL_SPEED),a
+				ld	(ix+O_CMD),0		; Speed cmd is one-shot (JS: pp.cmd=0 after speed change)
+				ret
+				
+	CmdBreak:		
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	e,a
+				ld	a,(VAR_CUR_TICK)
+				cp	e
+				ret	nz			; Execute break only on first tick of the row
+				
+				ld	l,(ix+O_PTR_L)
+				ld	h,(ix+O_PTR_H)
+				ld	e,(ix+O_CMD_DAT16)
+				ld	d,(ix+O_CMD_DAT16_H)
+				add	hl,de
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				ld	(ix+O_CMD),0
+				ret
+				
+	CmdEnv:			
+; Execute only on the first tick of the row.
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	e,a
+				ld	a,(VAR_CUR_TICK)
+				cp	e
+				ret	nz			; Not first tick: skip (do not touch hardware)
+				
+				ld	(ix+O_CMD),0		; One-shot command: clear immediately after execution
+				
+				ld	a,(ix+O_CMD_DAT)
+				ld	e,a
+				bit	4,a
+				jr	nz,KeepBaseTone
+				ld	(ix+O_PAT_VOL_L),15	; E0Y: mute base tone amplitude
+				ld	(ix+O_PAT_VOL_R),15
+	KeepBaseTone:		
+				and	$F0
+				cp	$D0			; STMF 'D' = Disable envelope
+				jr	z,DisableEnv
+				
+; STMF->SAA1099 EG register encoding.
+; JS reference: val = ((cmdValue & 0x0E) << 1) | (cmdValue & 0x81); val ^= 0x82
+; E = full cmdValue byte (both nibbles matter: upper nibble bit3 = E1y keep-amplitude)
+				ld	a,e
+				and	$0E			; A = cmdValue & 0x0E
+				add	a,a			; A = (cmdValue & 0x0E) << 1
+				ld	d,a			; D = high part
+				ld	a,e
+				and	$81			; A = cmdValue & 0x81 (bit7=ENVEXT, bit0=false-stereo)
+				or	d			; A = ((cmdValue & 0x0E) << 1) | (cmdValue & 0x81)
+				xor	$82			; A ^= 0x82  -> sets ENABL(bit3) and ENVEXT correctly
+				jr	SetEnv
+				
+	DisableEnv:		
+				xor	a			; 0 = Reset envelope generator
+				
+	SetEnv:			
+				ld	e,a
+				ld	a,(VAR_CH_IDX)
+				cp	3
+				jr	nc,EnvGen1
+				
+; Channels 0, 1, 2 use EG0 ($18)
+				ld	a,e
+				ld	(VAR_EG0_SHAPE),a	; Save EG0 shape
+				ld	a,$18
+				call	WriteSAA_Reg
+				ret
+				
+	EnvGen1:		
+; Channels 3, 4, 5 use EG1 ($19)
+				ld	a,e
+				ld	(VAR_EG1_SHAPE),a	; Save EG1 shape
+				ld	a,$19
+				call	WriteSAA_Reg
+				ret
+				
+; ===========================================================================
+; CmdDelayOrn: cmd $06 - Delay Ornament by N ticks
+; Each tick: suppress ornament (handled by ProcessOrnament check), count down.
+; When counter reaches 0: reset orn ptr to base, clear command.
+; ===========================================================================
+	CmdDelayOrn:		
+				dec	(ix+O_CMD_DAT)		; Decrement delay counter
+				ret	nz			; Still counting: keep cmd active (ProcessOrnament suppressed)
+; Delay expired: reset ornament pointer to base and clear command
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; CmdDelaySample: cmd $08 - Delay Sample by N ticks
+; While active, sample and ornament processing are suppressed. When the counter
+; reaches 0, sample restarts from base and normal playback resumes.
+; ===========================================================================
+	CmdDelaySample:		
+				ld	a,(ix+O_SAMP_NUM)
+				or	a
+				jr	z,CmdDelaySampleDone
+				ld	a,(ix+O_CMD_DAT)
+				or	a
+				jr	z,CmdDelaySampleDone
+				ld	b,a
+				ld	a,(VAR_GLOBAL_SPEED)
+				cp	b
+				jr	z,CmdDelaySampleDone	; Ignore delays >= current row speed
+				jr	c,CmdDelaySampleDone
+				dec	(ix+O_CMD_DAT)
+				ret	nz
+				ld	l,(ix+O_SAMP_BASE_L)
+				ld	h,(ix+O_SAMP_BASE_H)
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_NOTE_TRIG),1
+	CmdDelaySampleDone:	
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; Uses: AF, BC, DE, HL
+; ===========================================================================
+	GlissandoInit:		
+				; Step 1: save target note, restore base note
+				ld	a,(ix+O_NOTE)		; A = target note (just set by HandleNote)
+				ld	(ix+O_GLISS_NOTE),a	; Store target note
+				ld	a,(VAR_TEMP_NOTE)	; A = old note (base, where we slide FROM)
+				ld	(ix+O_NOTE),a		; Revert O_NOTE to base note
+				or	a
+				ret	z			; Old note = 0? No active glide, abort
+				; Step 2: compute freq_word for base note
+				dec	a			; 0-based index
+				call	GetFreqWordFromNote
+				ld	c,e			; C = base freq_byte
+				ld	b,d			; B = base octave
+				; Step 3: compute freq_word for target note
+				ld	a,(ix+O_GLISS_NOTE)
+				or	a
+				ret	z			; Target = 0? Abort
+				dec	a
+				call	GetFreqWordFromNote
+				; Step 4: delta = target_word - base_word (signed 16-bit)
+				ld	h,d
+				ld	l,e			; HL = target word
+				ld	d,b
+				ld	e,c			; DE = base word
+				or	a			; Clear carry
+				sbc	hl,de			; HL = target_word - base_word (signed delta)
+				; Step 5: store delta and reset command shift
+				ld	(ix+O_GLISS_TGT_L),l
+				ld	(ix+O_GLISS_TGT_H),h
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_CMD_PHASE),0
+				ret
+				
+; ===========================================================================
+; CmdPortamento: cmd $01 (Up) / cmd $02 (Down) - Portamento
+; paramH = (cmdDat >> 4): period in ticks between each shift step
+; paramL = (cmdDat & $0F): shift magnitude per step (frequency units)
+; O_CMD_PHASE: countdown (0 = reload from paramH)
+; O_CMD_SHIFT_L/H: accumulated 16-bit signed frequency shift
+; Shift accumulates indefinitely (no stop condition).
+; ===========================================================================
+	CmdPortamento:		
+				ld	a,(ix+O_CMD_PHASE)
+				or	a
+				jp	nz,PortPhaseActive
+				ld	a,(ix+O_CMD_DAT)
+				and	$F0
+				rrca
+				rrca
+				rrca
+				rrca				; A = paramH
+				or	a
+				ret	z			; paramH = 0: infinite period, never fires
+				ld	(ix+O_CMD_PHASE),a
+	PortPhaseActive:	
+				dec	(ix+O_CMD_PHASE)
+				ret	nz			; Still counting: nothing to do
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F			; A = paramL
+				ld	b,a
+				ld	a,(ix+O_CMD)
+				cp	$01
+				jp	z,PortUp
+				ld	a,(ix+O_CMD_SHIFT_L)
+				sub	b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,PortDownDone
+				dec	(ix+O_CMD_SHIFT_H)
+	PortDownDone:		
+				ret
+	PortUp:			
+				ld	a,(ix+O_CMD_SHIFT_L)
+				add	a,b
+				ld	(ix+O_CMD_SHIFT_L),a
+				ret	nc
+				inc	(ix+O_CMD_SHIFT_H)
+				ret
+				
+; ===========================================================================
+; CmdGlissando: cmd $03 - Glissando to given note
+; paramH = (cmdDat >> 4): period in ticks between each shift step
+; paramL = (cmdDat & $0F): shift magnitude per step
+; O_GLISS_NOTE: target note (1-96, stored by GlissandoInit)
+; O_GLISS_TGT_L/H: signed 16-bit target delta (target_freq_word - base_freq_word)
+; O_CMD_SHIFT_L/H: current accumulated signed 16-bit shift
+; O_CMD_PHASE: countdown
+; When shift reaches or passes the target delta: snap to target note, clear cmd.
+; ===========================================================================
+	CmdGlissando:		
+				ld	a,(ix+O_GLISS_NOTE)
+				or	a
+				ret	z
+				ld	a,(ix+O_CMD_PHASE)
+				or	a
+				jp	nz,GlissPhaseActive
+				ld	a,(ix+O_CMD_DAT)
+				and	$F0
+				rrca
+				rrca
+				rrca
+				rrca				; A = paramH
+				or	a
+				ret	z			; paramH = 0: never fires
+				ld	(ix+O_CMD_PHASE),a
+	GlissPhaseActive:	
+				dec	(ix+O_CMD_PHASE)
+				ret	nz
+				ld	a,(ix+O_GLISS_TGT_H)
+				bit	7,a
+				jp	nz,GlissDown
+	GlissUp:		
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F
+				ld	b,a
+				ld	a,(ix+O_CMD_SHIFT_L)
+				add	a,b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,GlissUpCheckSnap
+				inc	(ix+O_CMD_SHIFT_H)
+	GlissUpCheckSnap:	
+				ld	l,(ix+O_CMD_SHIFT_L)
+				ld	h,(ix+O_CMD_SHIFT_H)
+				ld	e,(ix+O_GLISS_TGT_L)
+				ld	d,(ix+O_GLISS_TGT_H)
+				or	a
+				sbc	hl,de
+				ret	c			; shift < target, keep sliding
+				jp	GlissSnap
+	GlissDown:		
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F
+				ld	b,a
+				ld	a,(ix+O_CMD_SHIFT_L)
+				sub	b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,GlissDownCheckSnap
+				dec	(ix+O_CMD_SHIFT_H)
+	GlissDownCheckSnap:	
+				ld	l,(ix+O_CMD_SHIFT_L)
+				ld	h,(ix+O_CMD_SHIFT_H)
+				ld	e,(ix+O_GLISS_TGT_L)
+				ld	d,(ix+O_GLISS_TGT_H)
+				or	a
+				sbc	hl,de
+				jp	z,GlissSnap
+				jp	pe,GlissDownOvf
+				jp	m,GlissSnap
+				ret
+	GlissDownOvf:		
+				jp	p,GlissSnap
+				ret
+	GlissSnap:		
+				ld	a,(ix+O_GLISS_NOTE)
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_GLISS_NOTE),0
+				ld	(ix+O_GLISS_TGT_L),0
+				ld	(ix+O_GLISS_TGT_H),0
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; CmdOrnOffset: cmd $07 - Set Ornament cursor to given position (one-shot)
+; ===========================================================================
+	CmdOrnOffset:		
+				ld	a,(ix+O_CMD_DAT)
+				or	a
+				jr	z,CmdOrnOffDone		; cmd_dat=0: no jump (JS: cmdValue must be > 0)
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	e,a
+				ld	d,0
+				add	hl,de			; HL = orn_base + cmd_dat (new cursor position)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+	CmdOrnOffDone:		
+				ld	(ix+O_CMD),0		; One-shot: clear command
+				ret
+				
+; ===========================================================================
+; Volume Mixer
+; D = pattern volume (0-15), E = sample volume (0-15) 
+; Output: A = final_vol -> (D+E)/2 (0-15)
+; ===========================================================================
+	MixVolume:		
+				ld	a,e			; A = sample volume
+				sub	d			; subtract pattern attenuation
+				ret	nc
+				xor	a			; clamp below 0
+				ret
+				
+; ===========================================================================
+; ProcessSample
+; ===========================================================================
+	ProcessSample:		
+				ld	a,(ix+O_SAMP_NUM)
+				or	a
+				ret	z
+				ld	a,(ix+O_CMD)
+				cp	$08
+				jr	nz,CheckSamplePtr
+				xor	a			; Delay sample keeps channel silent until trigger time
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+	CheckSamplePtr:		
+				
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				ld	a,h
+				or	l
+				jr	nz,ReadSample		; Non-zero pointer: read sample data
+				
+				xor	a			; Empty pointer: silence channel
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+				
+	ReadSample:		
+; Read Byte 1
+				ld	a,(hl)
+				inc	hl
+				
+; Check control byte
+				bit	7,a
+				jp	nz,ProcessControlByte
+				
+				ld	b,a
+				
+; Mix Left Volume
+				and	$0F
+				ld	e,a
+				ld	d,(ix+O_PAT_VOL_L)
+				call	MixVolume
+				ld	(ix+O_VOL_L),a
+				
+; Initialize flags to 0
+				ld	a,0
+				
+; Check if noise is enabled (STMF: 1 = Enabled)
+				bit	6,b
+				jr	z,SkipNoiseFlag		; If 0, skip enabling
+				set	1,a			; If 1, set Noise flag
+	SkipNoiseFlag:		
+				ld	(ix+O_FLAGS),a
+				
+; Skip noise freq update if disabled
+				bit	1,a
+				jr	z,ReadByte2
+				
+; Update Noise Frequency
+				ld	a,b
+				and	$30
+				rrca
+				rrca
+				rrca
+				rrca
+				ld	e,a
+				
+				ld	a,(VAR_CH_IDX)
+				cp	3
+				jr	nc,HandleGen2
+				
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				and	$FC
+				or	e
+				ld	(VAR_SAA_NOISE_FREQ),a
+				jr	ReadByte2
+				
+	HandleGen2:		
+				ld	a,e
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a
+				ld	e,a
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				and	$CF
+				or	e
+				ld	(VAR_SAA_NOISE_FREQ),a
+				
+	ReadByte2:		
+; Read Byte 2
+				ld	a,(hl)
+				inc	hl
+				ld	b,a
+				
+; Mix Right Volume
+				and	$0F
+				ld	e,a
+				ld	d,(ix+O_PAT_VOL_R)
+				call	MixVolume
+				ld	(ix+O_VOL_R),a
+				
+; Check if tone is enabled (STMF: 1 = Enabled)
+				bit	7,b
+				jr	z,SkipToneFlag		; If 0, skip enabling
+				ld	a,(ix+O_FLAGS)
+				or	1			; Set Tone flag safely via register ops
+				ld	(ix+O_FLAGS),a
+	SkipToneFlag:		
+				
+; Calculate Octave Offset
+				ld	a,b
+				and	$70
+				rrca
+				rrca
+				rrca
+				rrca
+				bit	2,a
+				jr	z,PositiveOctave
+				or	$F8
+	PositiveOctave:		
+				ld	(ix+O_FREQ_OFFSET_H),a
+				
+; Read Byte 3 (Frequency Fine-tune)
+				ld	a,(hl)
+				inc	hl
+				ld	(ix+O_FREQ_OFFSET_L),a
+				
+; CRITICAL: Update pointer after inner loop!
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ret
+				
+	ProcessControlByte:	
+				cp	$80
+				jr	z,SavePointer
+; Check if in release phase: released sample skips loop-back, continues into release section
+; NOTE: Must use ld b,a / ld a,b (NOT push/pop af) to preserve the Z flag from 'or a'.
+; pop af would restore old flags from cp $80, making jp nz always branch (loop-back dead code).
+				ld	b,a			; Save ctrl byte (ld does not affect flags)
+				ld	a,(ix+O_RELEASED)
+				or	a			; Z=0 if released, Z=1 if not released
+				ld	a,b			; Restore ctrl byte (ld does not affect Z flag)
+				jp	nz,ReadSample		; Released: continue forward past loop ctrl byte
+; Control Loop (normal: not in release)
+				and	$7F
+				ld	e,a
+				ld	a,128
+				sub	e			; A = 128 - N
+				ld	l,a
+				ld	h,0			; HL = 128 - N
+				ld	e,l
+				ld	d,h			; DE = 128 - N
+				add	hl,hl			; HL = (128 - N) * 2
+				add	hl,de			; HL = (128 - N) * 3
+				ld	e,l
+				ld	d,h			; DE = jump back offset
+				
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				sub	a			; Clear carry (A=0, C=0)
+				sbc	hl,de			; HL = new position
+; Save new position
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				jp	ReadSample
+				
+	SavePointer:		
+; End-of-sample ($80): stop sample playback.
+; JS player marks the channel as no longer playing once the sample reaches its
+; end, so keeping the pointer on $80 would incorrectly sustain the last frame.
+				xor	a
+				ld	(ix+O_SAMP_PTR_L),a
+				ld	(ix+O_SAMP_PTR_H),a
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+				
+; ===========================================================================
+; UpdateSAA_Registers
+; ===========================================================================
+	UpdateSAA_Registers:	
+				xor	a
+				ld	(VAR_SAA_OCTAVES),a
+				ld	(VAR_SAA_OCTAVES+1),a
+				ld	(VAR_SAA_OCTAVES+2),a
+				ld	(VAR_SAA_FREQ_EN),a
+				ld	(VAR_SAA_NOISE_EN),a
+				
+				ld	ix,CH_DATA
+				ld	de,5 * CH_STRUCT_SIZE
+				add	ix,de
+				ld	b,6
+				ld	c,5
+				
+	RegLoop:		
+				push	bc
+				ld	a,c
+				ld	(VAR_CH_IDX),a
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				ld	a,h
+				or	l
+				jp	z,SilentChannel
+				
+				ld	a,(ix+O_NOTE)
+				or	a
+				jr	z,HandleDecay
+				
+    ; --- NEW NOTE TRIGGER ---
+				dec	a
+				ld	l,a
+				ld	h,0
+				
+				ld	a,(ix+O_POS_TRANSPOSE)
+				ld	e,a			; E = low byte
+				add	a,a
+				sbc	a,a
+				ld	d,a			; D = sign extension
+				add	hl,de
+				
+				ld	a,l
+				ld	(ix+O_ACT_NOTE),a	; SAVE BASE NOTE (Note + Transpose ONLY)
+				jr	ApplyOrnament
+				
+	HandleDecay:		
+				ld	a,(ix+O_ACT_NOTE)	; Load base note
+				ld	l,a
+				ld	h,0
+				
+	ApplyOrnament:		
+    ; --- ADD ORNAMENT DYNAMICALLY EVERY TICK ---
+				ld	a,(ix+O_ORN_OFFSET)
+				ld	e,a			; E = low byte
+				add	a,a
+				sbc	a,a
+				ld	d,a			; D = sign extension
+				add	hl,de
+				
+    ; Clamp 0 to 95
+				bit	7,h
+				jr	z,NoteNotNeg
+				ld	hl,0
+				jr	NoteClamp
+	NoteNotNeg:		
+				ld	a,h
+				or	a
+				jr	nz,NoteOver
+				ld	a,l
+				cp	96
+				jr	c,NoteClamp
+	NoteOver:		
+				ld	hl,95
+	NoteClamp:		
+				ld	e,l			; E = Final note for table lookup
+				
+	GetFreq:		
+				ld	a,e
+				call	GetFreqWordFromNote
+				
+; --- Channel Bit Mask (CRITICAL FOR SOUND) ---
+				ld	a,c
+				ld	h,1
+				or	a
+				jr	z,MaskDone
+	MaskLoop:		
+				sla	h
+				dec	a
+				jr	nz,MaskLoop
+	MaskDone:		
+				ld	a,(ix+O_FLAGS)
+				bit	0,a
+				jr	z,NoToneBit
+				
+				ld	a,(VAR_SAA_FREQ_EN)
+				or	h
+				ld	(VAR_SAA_FREQ_EN),a
+				
+	NoToneBit:		
+				ld	a,(ix+O_FLAGS)
+				bit	1,a
+				jr	z,NoNoiseBit
+				
+				ld	a,(VAR_SAA_NOISE_EN)
+				or	h
+				ld	(VAR_SAA_NOISE_EN),a
+				
+	NoNoiseBit:		
+				
+; --- ENVELOPE RETRIGGER ---
+				ld	a,(ix+O_CMD)
+				cp	$08
+				jr	z,EnvRetrigDone		; Delay sample keeps trigger pending until start
+				ld	a,(ix+O_NOTE_TRIG)
+				or	a
+				jr	z,EnvRetrigDone
+				ld	(ix+O_NOTE_TRIG),0	; Clear trigger flag
+				
+				ld	a,c
+				cp	3
+				jr	nc,RetrigEG1
+				
+				ld	a,(VAR_EG0_SHAPE)
+				or	a
+				jr	z,EnvRetrigDone		; Do not trigger if EG is disabled
+				push	de			; Preserve frequency and octave across EG write
+				ld	e,a
+				ld	a,$18
+				call	WriteSAA_Reg
+				pop	de			; Restore frequency and octave
+				jr	EnvRetrigDone
+				
+	RetrigEG1:		
+				ld	a,(VAR_EG1_SHAPE)
+				or	a
+				jr	z,EnvRetrigDone		; Do not trigger if EG is disabled
+				push	de			; Preserve frequency and octave across EG write
+				ld	e,a
+				ld	a,$19
+				call	WriteSAA_Reg
+				pop	de			; Restore frequency and octave
+				
+	EnvRetrigDone:		
+				
+	; --- Apply 11-bit combined pitch shift ---
+				ld	a,e			; A = Base frequency
+				add	a,(ix+O_FREQ_OFFSET_L)	; Add low byte shift
+				ld	e,a			; E = New frequency
+				
+				ld	a,d			; A = Base octave
+				adc	a,(ix+O_FREQ_OFFSET_H)	; Add high byte shift (sign extended) + carry
+				ld	d,a
+				ld	a,e
+				add	a,(ix+O_CMD_SHIFT_L)
+				ld	e,a
+				ld	a,d
+				adc	a,(ix+O_CMD_SHIFT_H)
+				and	$07			; Wrap octave to 0-7
+				
+	OctOk:			
+				ld	d,a			; D = final valid octave
+				
+	SilentWrite:		
+	FreqDone:		
+; --- Write Frequency ($08-$0D for channels 0-5) ---
+				ld	a,c
+				add	a,8
+				call	WriteSAA_Reg
+				
+; --- Write Volume ($00-$05 for channels 0-5) ---
+; Stereo: pack right vol into upper nibble, left vol into lower nibble (RRRRLLLL)
+				ld	a,(ix+O_VOL_R)
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a			; A = VolR << 4
+				or	(ix+O_VOL_L)		; A = (VolR << 4) | VolL
+				ld	e,a
+				
+				ld	a,c			; A = channel index
+				call	WriteSAA_Reg
+				
+; --- Save Octave to VAR_SAA_OCTAVES ---
+				push	hl
+				ld	a,c
+				srl	a
+				ld	hl,VAR_SAA_OCTAVES
+				add	a,l
+				ld	l,a
+				jr	nc,NoCarryOct
+				inc	h
+	NoCarryOct:		
+				ld	a,c
+				and	1
+				jr	nz,UpperNibble
+				ld	a,(hl)
+				and	$F0
+				or	d
+				ld	(hl),a
+				jr	OctSaveDone
+				
+	SilentChannel:		
+				xor	a
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ld	e,a
+				ld	d,a
+				jp	SilentWrite
+				
+; ===========================================================================
+; Input: A = zero-based note index (0-95)
+; Output: E = frequency byte, D = octave
+; Uses: AF, B, DE, HL
+; Looks up the 12-note low-byte table and derives octave in code.
+; B wraps into the next octave, B-8 is clamped to the highest valid value.
+; ===========================================================================
+	GetFreqWordFromNote:	
+				ld	b,0			; B = octave base
+	FreqOctaveLoop:		
+				cp	12
+				jp	c,FreqClassReady
+				sub	12
+				inc	b
+				jp	FreqOctaveLoop
+	FreqClassReady:		
+				ld	e,a
+				ld	d,0
+				ld	hl,FREQ_TABLE
+				add	hl,de
+				ld	e,(hl)			; E = class frequency byte
+				ld	d,b			; D = octave base
+				ld	a,e
+				cp	$05			; B note wraps into next octave
+				ret	nz
+				inc	d
+				ld	a,d
+				cp	8
+				ret	c
+				ld	e,$F3			; Clamp B-8 to the highest valid table value
+				ld	d,7
+				ret
+	UpperNibble:		
+				ld	a,d
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a
+				ld	b,a
+				ld	a,(hl)
+				and	$0F
+				or	b
+				ld	(hl),a
+	OctSaveDone:		
+				pop	hl
+				
+	NextCh:			
+				ld	de,$FFDB		; -CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	c
+				dec	b
+				jp	nz,RegLoop
+				
+; --- Global Flush: write octave, freq-enable, noise-enable, noise-freq ---
+				ld	hl,VAR_SAA_OCTAVES
+				ld	a,$10
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				inc	hl
+				ld	a,$11
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				inc	hl
+				ld	a,$12
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_FREQ_EN)
+				ld	e,a
+				ld	a,$14
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_NOISE_EN)
+				ld	e,a
+				ld	a,$15
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				ld	e,a
+				ld	a,$16
+				call	WriteSAA_Reg
+				ret
+				
+; ===========================================================================
+; ProcessOrnament
+; ===========================================================================
+	ProcessOrnament:	
+				ld	a,(ix+O_ORN_NUM)
+				or	a
+				jr	z,NoOrn
+				
+; --- Cmd $06/$08: suppress ornament output during countdown ---
+				ld	a,(ix+O_CMD)
+				cp	$06
+				jr	z,NoOrn
+				cp	$08
+				jr	z,NoOrn
+				
+				ld	l,(ix+O_ORN_PTR_L)
+				ld	h,(ix+O_ORN_PTR_H)
+				
+; Check for zero (unresolved or empty) ornament pointer
+				ld	a,h
+				or	l
+				jr	z,NoOrn
+				
+	ReadOrn:		
+				ld	a,(hl)
+				inc	hl
+				
+				bit	7,a			; bit7=1 means ornament controller
+				jr	nz,HandleOrnCtrl
+				
+				bit	6,a			; 7-bit signed to 8-bit signed extension
+				jr	z,SaveOrnData
+				or	$80
+	SaveOrnData:		
+				ld	(ix+O_ORN_OFFSET),a
+				
+	SaveOrnPtr:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ret
+				
+	HandleOrnCtrl:		
+				and	$7F
+				jr	z,OrnEnd		; $80 = end of ornament
+				
+; Loop controller: back = (128 - ctrlValue)
+; Note: HL is reloaded from O_ORN_PTR (points to ctrl byte), so no +1 needed
+				ld	e,a
+				ld	a,128
+				sub	e
+				ld	e,a
+				ld	d,0
+				
+				ld	l,(ix+O_ORN_PTR_L)
+				ld	h,(ix+O_ORN_PTR_H)
+				sub	a			; Clear carry (A=0, C=0)
+				sbc	hl,de
+				
+	SaveOrnLoopPtr:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				jr	ReadOrn
+				
+	OrnEnd:			
+				dec	hl			; Keep pointer on end controller ($80)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ret
+				
+	NoOrn:			
+				ld	(ix+O_ORN_OFFSET),0
+				ret
+				
+; ===========================================================================
+; WriteSAA_Reg: A = register, E = data
+; ===========================================================================
+	WriteSAA_Reg:		
+				push	bc
+				ld	bc,SAA_ADDR_PORT	; Load 16-bit address port into BC
+				out	(c),a			; Select register
+				ld	bc,SAA_DATA_PORT	; Load 16-bit data port into BC
+				out	(c),e			; Write data to register
+				pop	bc
+				
+				ret
+				
+; ===========================================================================
+; ResetSAA
+; ===========================================================================		
+	ResetSAA:		
+; Chip reset and synchronisation (Reg $1C, bit 1 = 1)
+				ld	bc,SAA_ADDR_PORT
+				ld	a,$1C
+				out	(c),a
+				ld	bc,SAA_DATA_PORT
+				ld	a,$02
+				out	(c),a
+				
+				ld	d,0
+	ClearSAA:		
+; Clear all registers (0-31)
+				ld	bc,SAA_ADDR_PORT
+				out	(c),d
+				ld	bc,SAA_DATA_PORT
+				xor	a			; A = 0
+				out	(c),a
+				inc	d
+				ld	a,d
+				cp	32
+				jr	nz,ClearSAA
+				
+; Enable chip (Reg $1C, bit 0 = 1)
+				ld	bc,SAA_ADDR_PORT
+				ld	a,$1C
+				out	(c),a
+				ld	bc,SAA_DATA_PORT
+				ld	a,$01
+				out	(c),a
+				ret
+				
+; ===========================================================================
+; Frequency Table Low Bytes (C-x to B-x)
+; Octave is derived in code, B advances to the next octave.
+; ===========================================================================
+	FREQ_TABLE:		
+				db	$21, $3C, $55, $6D, $84, $99, $AD, $C0, $D2, $E3, $F3, $05; C-x to B-x
+				
+	SONG_DATA:		
+				incbin	"04 - Arcane-Zone-Part-2-ZX-AAA-Demo-Compo-2013-2-.bin"	;"Popcorn.stmf.bin"

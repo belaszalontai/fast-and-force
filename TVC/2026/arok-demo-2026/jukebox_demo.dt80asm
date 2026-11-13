@@ -1,0 +1,4332 @@
+; Version 2026-05-02 17:55
+;				
+; MEMORY MAP				
+; MUSIC_BY_TEXT		equ	$0100
+; tunel_dist_row		equ	$0100	; for TUNNEL
+; tunel_angle_row		equ	$0200	; for TUNNEL
+; siny			equ	$0100		; for ROTOZOOM
+; MUSIC_BY_TEXT		equ	$0100		; decompressed by ZX7 to $0100
+; FEATURES_TEXT		equ	$0100		; decompressed by ZX7 to $0100
+; sinx			equ	$0200		; for ROTOZOOM
+; redefined characters	equ	$0740		; Á and É is redefined
+; CH_DATA:		equ	$0754		; used by SAA player (rom character redefine table Í)
+; SONG_DATA		equ	$C000
+; CHAR_SET		equ	$F0FF-$FFFF	; for rendering special characters
+				
+				;{BASIC Header
+				org	6639			; TVC programok kezdőcíme
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+				jp	MAIN
+				
+; ===========================================================================
+; --- Hardware Definitions ---
+	SAA_ADDR_PORT		equ	$23
+	SAA_DATA_PORT		equ	$22
+				
+; --- Variables ---
+	VAR_GLOBAL_SPEED:	db	6
+	VAR_CUR_TICK:		db	1
+	VAR_POS_ROWS_LEFT:	db	1			; Force reload on first frame
+	VAR_POS_PTR:		dw	0			; Pointer to current Position Block
+	VAR_PATS_PTR:		dw	0			; Pointer to Pattern Pointer List
+	VAR_MUSIC_BASE:		dw	0
+	VAR_SAA_OCTAVES:	ds	3			; Shadow for Reg $10, $11, $12
+	VAR_SAA_FREQ_EN:	db	0			; Shadow for Reg $14
+	VAR_SAA_NOISE_EN:	db	0			; Shadow for Noise Enable bits
+	VAR_SAA_NOISE_FREQ:	db	0			; Shadow for Reg $16 (Noise Freq Control)
+	VAR_CH_IDX:		db	0			; Current channel index for ProcessSample
+	VAR_EG0_SHAPE:		db	0			; Saved EG0 ($18) shape
+	VAR_EG1_SHAPE:		db	0			; Saved EG1 ($19) shape
+	VAR_TEMP_NOTE:		db	0			; Previous note for Glissando init
+				
+; ===========================================================================
+; Channel Structure Definition
+; ===========================================================================
+	SONG_DATA		equ	$C000
+				
+	CH_STRUCT_SIZE		equ	37
+				
+; --- Playback Control ---
+	O_PTR_L			equ	0			; Current Pattern Data Pointer L
+	O_PTR_H			equ	1			; Current Pattern Data Pointer H
+	O_WAIT			equ	2			; Rows to wait
+	O_NOTE			equ	3			; Current Note Index (1-96)
+				
+; --- Instrument Status ---
+	O_SAMP_NUM		equ	4			; Current Sample ID
+	O_ORN_NUM		equ	5			; Current Ornament ID
+	O_VOL_L			equ	6			; Current Calculated Volume Left (0-15)
+	O_VOL_R			equ	7			; Current Calculated Volume Right (0-15)
+				
+; --- Commands & Data ---
+	O_CMD			equ	8			; Current Command ID
+	O_CMD_DAT		equ	9			; Command Data (8-bit standard)
+	O_CMD_DAT16		equ	10			; Command Data (16-bit for Break/Slide) - LOW BYTE
+	O_CMD_DAT16_H		equ	11			; Command Data (16-bit) - HIGH BYTE
+				
+; --- Sample & Ornament Engine Pointers ---
+	O_SAMP_PTR_L		equ	12			; Pointer to Sample Data L
+	O_SAMP_PTR_H		equ	13			; Pointer to Sample Data H
+	O_ORN_PTR_L		equ	14			; Pointer to Ornament Data L
+	O_ORN_PTR_H		equ	15			; Pointer to Ornament Data H
+				
+; --- Engine Counters ---
+	O_RELEASED		equ	16			; Released flag (1 = in release phase)
+	O_CMD_PHASE		equ	17			; Portamento/Glissando phase counter
+				
+; --- Frequency Modifications ---
+	O_POS_TRANSPOSE		equ	18			; Base Transpose from Position List (Signed Byte)
+	O_FREQ_OFFSET_L		equ	19			; Fine frequency offset (Vibrato/Slide) L
+	O_FREQ_OFFSET_H		equ	20			; Fine frequency offset (Vibrato/Slide) H
+				
+; --- Flags & Internal ---
+	O_FLAGS			equ	21			; General flags (bit0=tone enable, bit1=noise enable)
+				
+; --- Ornament ---
+	O_ORN_OFFSET		equ	22
+				
+	O_SAMP_BASE_L		equ	23			; Base pointer to Sample Data L
+	O_SAMP_BASE_H		equ	24			; Base pointer to Sample Data H
+	O_ORN_BASE_L		equ	25			; Base pointer to Ornament Data L
+	O_ORN_BASE_H		equ	26
+				
+	O_PAT_VOL_L		equ	27			; Saved Pattern Volume L
+	O_PAT_VOL_R		equ	28			; Saved Pattern Volume R
+				
+	O_ACT_NOTE		equ	29			; Last calculated pitch for decay
+	O_NOTE_TRIG		equ	30			; Flag for envelope retrigger
+	O_RELEASABLE		equ	31			; Flag: sample has release section ($FF marker)
+	O_CMD_SHIFT_L		equ	32			; Fine pitch shift from command (L)
+	O_CMD_SHIFT_H		equ	33			; Fine pitch shift from command (H)
+	O_GLISS_NOTE		equ	34			; Glissando target note
+	O_GLISS_TGT_L		equ	35			; Glissando target word L
+	O_GLISS_TGT_H		equ	36			; Glissando target word H
+				
+	CH_DATA:		equ	$0754			; ds	6 * CH_STRUCT_SIZE AT CHARACTER DEFINE AREA (from character: Í)
+				
+	MSC_INDEX		db	0
+				
+				
+;******************************************************************
+; INTERRUPT HANDLER 
+;******************************************************************                                         
+	IT_HANDLER		out	(7),A
+				push	af
+				
+				ld	a,(IT_IDX)
+				xor	1			; alternate ITs
+				ld	(IT_IDX),a
+				jp	nz,IT_SND
+; NORMAL IT	
+	IRQ_PALETTE1:		ld	A,$05			; sötét lila       
+				out	($61),A
+	IRQ_PALETTE2:		ld	A,$01			; sötét kék  
+				out	($62),A
+	IRQ_PALETTE3:		ld	A,$55			; fehér       
+				out	($63),A
+				
+				ld	a,14			; NEXT CURSOR POS
+				out	(112),a
+				ld	a,11
+				out	(113),a
+				ld	a,15
+				out	(112),a
+				ld	a,1
+				out	(113),a
+				pop	af
+				ei
+				ret
+				
+; SOUND PLAYER IT
+	IRQ_PALETTE4:		
+	IT_SND:			ld	A,$51			; kékeszöld       
+				out	($61),A
+	IRQ_PALETTE5:		ld	A,$01			; sötét kék
+				out	($62),A
+	IRQ_PALETTE6:		ld	A,$54			; sárga
+				out	($63),A
+				
+				ld	a,1			; restore 4 color mode
+				out	(6),A
+				
+				ld	a,(MUSIC_ENABLE_FLAG)
+				or	a
+				jp	z,IT_NO_MUSIC
+				
+				push	bc
+				push	de
+				push	hl
+				push	ix
+				
+				call	PlayFrame
+				
+				pop	ix
+				pop	hl
+				pop	de
+				pop	bc
+				
+	IT_NO_MUSIC:		ld	a,14			; next cursor pos
+				out	(112),a
+				ld	a,0
+				out	(113),a
+				ld	a,15
+				out	(112),a
+				ld	a,1
+				out	(113),a
+	DRAW_AREA_GR_MODE:	
+				ld	a,1
+				out	(6),A
+				
+				pop	af
+				ei
+				ret
+				
+	IT_HANDLER_1		db	00H
+	IT_HANDLER_2		dw	0000H
+	IT_IDX			db	0
+	MUSIC_ENABLE_FLAG	db	1
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   					
+	MAIN:			ld	C,$01			; C = Graphics 4
+				rst	$30			; $30 system call                              
+				db	$4			; set VMODE       
+				
+; init main screen			
+				di
+				call	SET_CHARACTER
+				call	CRTC_DISABLE
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás				
+				
+				ld	A,$00			; fekete       
+				out	($60),A
+				ld	A,$05			; sötét lila       
+				out	($61),A
+				ld	A,$01			; sötét kék  
+				out	($62),A
+				ld	A,85			; fehér       
+				out	($63),A
+				
+; draw main picture							
+				call	DRAW_JUKEBOX
+; COPYRIGHT TEXT
+				ld	A,$50			; lapozási kód: U0, U1, U2, SYS
+				out	($02),a			; Belapozás
+				ld	a,2			; set ink to palette 2
+				ld	(2893),a
+				ld	bc,$0118		; B = oszlop(1-32): 1, C = sor(1-24): 24
+				rst	$30
+				db	$23
+				ld	a,(TEXT00)
+				ld	c,a
+				ld	b,0
+				ld	de,TEXT00 + 1
+				rst	$30
+				db	$22
+; SAA 1099 TEXT
+				ld	a,2			; set ink to palette 2
+				ld	(2893),a
+				ld	bc,$0113		; B = oszlop(1-32): 1, C = sor(1-24): 19
+				rst	$30
+				db	$23
+				ld	a,(TEXT_1)
+				ld	c,a
+				ld	b,0
+				ld	de,TEXT_1 + 1
+				rst	$30
+				db	$22
+; PLAYING: TEXT
+				ld	a,1			; set ink to palette 1
+				ld	(2893),a
+				ld	bc,$0115		; B = oszlop(1-32): 1, C = sor(1-24): 21
+				rst	$30
+				db	$23
+				ld	a,(TEXT_0)
+				ld	c,a
+				ld	b,0
+				ld	de,TEXT_0 + 1
+				rst	$30
+				db	$22
+				
+				ld	A,(0038H)		; SAVE IT HANDLER
+				ld	(IT_HANDLER_1),A
+				ld	HL,(0039H)
+				ld	(IT_HANDLER_2),HL
+				ld	A,0C3H			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038H),A
+				ld	HL,IT_HANDLER
+				ld	(0039H),HL
+				
+				xor	a
+				ld	(MUSIC_ENABLE_FLAG),a
+				ei
+				
+				call	CRTC_ENABLE
+				
+				ld	a,0			; 0 init music (track 1)
+				ld	(MSC_INDEX),a
+				call	LOAD_MUSIC
+				ld	hl,0
+				ld	(DEMO_FRAME_CNT),hl
+				ld	(SCENE_START_FRAME),hl
+				ld	a,1			; 1 init first scene
+				ld	(SCENE_ID),a
+				xor	a
+				ld	(SCENE_LOCAL_FLAG),a
+				
+				jp	PlayerLoop
+				
+;--------------------------------------------------------------------------------------------------------------------------------------	
+; 222 byte free area
+;--------------------------------------------------------------------------------------------------------------------------------------	
+	SC_15_CLS_FLAG		db	0
+	SC_15_CLS_FLAG2		db	0
+				
+	SCENE_15_PH_A:						; RENDER MUSIC BY TEXTS
+				ld	a,(SC_15_CLS_FLAG)
+				or	a
+				ret	nz
+				inc	a			; set flag ensures run this only ONCE
+				ld	(SC_15_CLS_FLAG),a
+				
+				call	CLS
+				ld	a,$55			; set color of text in all irq
+				ld	(IRQ_PALETTE1+1),a
+				ld	(IRQ_PALETTE4+1),a
+				
+				ld	de,MUSIC_BY_TEXT
+				ld	hl,$0102		; col=1, row=2
+				ld	b,22
+				
+	char_loop001:		call	HALT_ON_TOP
+				push	bc
+				push	hl
+				push	de
+				ld	b,h			; B = col
+				ld	c,l			; C = row
+				call	RST30DB3		; compute VRAM_POSITION from BC
+				pop	de
+				push	de
+				call	RST30DB2		; write text (stops at db 0 terminator)
+				pop	de			; DE = text row start
+				ld	hl,33
+				add	hl,de			; HL = text_ptr + 33 (next row)
+				ex	de,hl			; DE = text_ptr + 33
+				pop	hl
+				inc	l			; next row
+				pop	bc
+				djnz	char_loop001
+				
+				ret
+				
+	SCENE_15_PH_B:		
+				ld	a,(SC_15_CLS_FLAG2)
+				or	a
+				ret	nz
+				inc	a			; set flag ensures run this only ONCE
+				ld	(SC_15_CLS_FLAG2),a
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				call	INIT_FEATURES
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				call	CLS
+				ret				; placeholder B (frame 800)
+				
+; LAST SCENE  -> FEATURES			
+	SCENE_15_PH_C:		ld	de,FEATURES_TEXT
+				ld	hl,$0108		; col=1, row=8
+				ld	b,9
+				call	char_loop001
+				
+				ld	b,255
+	Feat_Wait:		halt
+				halt
+				halt
+				halt
+				djnz	Feat_Wait
+				
+; FINISH DEMO
+				call	CLS
+				xor	a			; initial fadeout attenuation = 0
+	Fade_Loop:		ld	(FADE_ATT_PATCH+1),a	; patch self-mod operand in MixVolume
+				cp	$0F			; max attenuation reached?
+				jr	z,Fade_Done		; yes: end demo
+				push	af
+				ld	b,$07			; 7 frames per step (15 steps = ~105 frames total)
+	Fade_Wait:		halt				; 20ms tick (IRQ-based)
+				halt
+				djnz	Fade_Wait
+				pop	af
+				inc	a			; next attenuation level
+				jr	Fade_Loop
+				
+	Fade_Done:		di
+				ld	e,0			; disable sound and noise on SAA
+				ld	a,$14
+				call	WriteSAA_Reg
+				ld	e,0
+				ld	a,$15
+				call	WriteSAA_Reg
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				call	CRTC_DISABLE
+; set palette for FAF LOGO
+				ld	A,$55			; fehér         
+				out	($61),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$01			; sötétkék       
+				out	($63),A
+				
+				ld	hl,PIC_TVC40_ZX7
+				ld	de,$c000
+				ld	bc,723
+				ldir
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	hl,$c000
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	CRTC_ENABLE
+				
+; final delay befor end								
+				ld	hl,65535
+	end_wait		dec	hl
+				ld	a,h
+				or	l
+				jr	nz,end_wait
+				call	CLS
+				halt				; freeze CPU - DEMO END
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; tables aligned to 256 byte DO NOT REMOVE FROm HERE
+;--------------------------------------------------------------------------------------------------------------------------------------				
+				org	$1C00			; DO NOT MODIFY this ORG
+				
+	data:			incbin	"smooth_data_gfx16.bin"	; 256 byte, GFX16
+	TUNEL_TEX:		incbin	"tunnel_tex.bin"	; 256 byte
+	TUNEL_TEX2:		incbin	"tunnel_tex2.bin"	; 256 byte - noisy intro texture
+				
+	sin:			db	$3f, $40, $42, $43, $45, $46, $48, $49; 256 byte
+				db	$4b, $4c, $4e, $4f, $51, $52, $54, $55
+				db	$57, $58, $59, $5b, $5c, $5e, $5f, $60
+				db	$62, $63, $64, $65, $66, $68, $69, $6a
+				db	$6b, $6c, $6d, $6e, $6f, $70, $71, $72
+				db	$73, $74, $75, $75, $76, $77, $77, $78
+				db	$79, $79, $7a, $7a, $7b, $7b, $7c, $7c
+				db	$7c, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7e, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7c, $7c, $7c, $7b, $7b, $7a, $7a, $79
+				db	$79, $78, $77, $77, $76, $75, $75, $74
+				db	$73, $72, $71, $70, $6f, $6e, $6d, $6c
+				db	$6b, $6a, $69, $68, $66, $65, $64, $63
+				db	$62, $60, $5f, $5e, $5c, $5b, $59, $58
+				db	$57, $55, $54, $52, $51, $4f, $4e, $4c
+				db	$4b, $49, $48, $46, $45, $43, $42, $40
+				db	$3f, $3d, $3b, $3a, $38, $37, $35, $34
+				db	$32, $31, $2f, $2e, $2c, $2b, $29, $28
+				db	$26, $25, $24, $22, $21, $1f, $1e, $1d
+				db	$1b, $1a, $19, $18, $17, $15, $14, $13
+				db	$12, $11, $10, $0f, $0e, $0d, $0c, $0b
+				db	$0a, $09, $08, $08, $07, $06, $06, $05
+				db	$04, $04, $03, $03, $02, $02, $01, $01
+				db	$01, $00, $00, $00, $00, $00, $00, $00
+				db	$00, $00, $00, $00, $00, $00, $00, $00
+				db	$01, $01, $01, $02, $02, $03, $03, $04
+				db	$04, $05, $06, $06, $07, $08, $08, $09
+				db	$0a, $0b, $0c, $0d, $0e, $0f, $10, $11
+				db	$12, $13, $14, $15, $17, $18, $19, $1a
+				db	$1b, $1d, $1e, $1f, $21, $22, $24, $25
+				db	$26, $28, $29, $2b, $2c, $2e, $2f, $31
+				db	$32, $34, $35, $37, $38, $3a, $3b, $3d
+				
+	; --- Tunnel precomputed lookup tables (32 cols x 32 rows = 1024 bytes each) ---
+	; Placed here to guarantee U0 page ($0000-$3FFF) - safe to read during VID paging ($90)
+	TUNEL_ANGLE_TABLE:	incbin	"tunnel_angle.bin"	; (1024 bytes)
+	TUNEL_DIST_TABLE:	incbin	"tunnel_dist.bin"	; (1024 bytes)					
+				
+;----------------------------------------------------------------------------------------------------------------				
+	CLS			ld	hl,$8000
+				ld	bc,$3FFF
+				ld	d,0
+	cls_loop		ld	(hl),d
+				inc	hl
+				dec	bc
+				ld	a,b
+				or	c
+				jr	nz,cls_loop
+				ret
+				
+; ===========================================================================
+; Main Loop
+; ===========================================================================
+	SCENE_DUR_01		equ	500			; MUSIC 1 + JUKEBOX + BORDER DRAW + CRTC EFFECT
+	SCENE_DUR_02		equ	480			; MUSIC 1 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_03		equ	1000			; change to MUSIC 2 (one time action) then -> JUKEBOX + BORDER DRAW
+	SCENE_DUR_04		equ	370			; change to MUSIC 3 (one time action) then -> JUKEBOX + BORDER DRAW
+	SCENE_DUR_05		equ	1970			; MUSIC 3 + PLASMA EFFECT
+	SCENE_DUR_06		equ	330			; MUSIC 3 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_07		equ	380			; change to MUSIC 4 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_08		equ	1600			; MUSIC 4 + ROTO ZOOM EFFECT
+	SCENE_DUR_09		equ	400			; MUSIC 4 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_10		equ	760			; change to MUSIC 5 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_11		equ	1270			; MUSIC 5 + TUNEL effect
+	SCENE_DUR_12		equ	380			; MUSIC 5 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_13		equ	640			; change to MUSIC 6 + JUKEBOX + BORDER DRAW
+	SCENE_DUR_14		equ	1270			; MUSIC 6 + TEXTURE FLYTHROUGH
+	SCENE_DUR_15		equ	5000			; MUSIC 6 + GREETINGS
+				
+				
+	BAND_HEIGHT		equ	152			; draw to border music band height
+	LINE_HEIGHT		equ	2			; draw to border line height
+	DEMO_FRAME_CNT		dw	0
+	SCENE_START_FRAME	dw	0
+	SCENE_ID		db	1
+	SCENE_LOCAL_FLAG	db	0
+				
+				
+	PlayerLoop:		halt
+				ld	a,(IT_IDX)		; wait for non music IT (20ms)
+				or	a
+				jp	nz,PlayerLoop
+				
+	; render BORDER		
+	BORDER_RENDER_GATE:	nop
+				nop
+				nop
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+0*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+1*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+2*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+3*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+4*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				ld	a,(CH_DATA+5*CH_STRUCT_SIZE+O_VOL_L)
+				call	COLOR_BORDER
+				ld	b,BAND_HEIGHT
+				call	COUNT_DOWN
+				call	COUNT_DOWN_WHITE
+				
+				xor	a
+				out	($0),a
+	; end of render BORDER			
+	BORDER_SKIP:		
+				call	SCENE_DISPATCH
+				call	DEMO_FRAME_TICK
+				jp	PlayerLoop
+				
+; Scene scheduler and scene handlers
+	DEMO_FRAME_TICK:	ld	hl,(DEMO_FRAME_CNT)
+				inc	hl
+				ld	(DEMO_FRAME_CNT),hl
+				ret
+				
+	SCENE_DISPATCH:		ld	a,(SCENE_ID)
+				cp	1
+				jp	z,SCENE_01
+				cp	2
+				jp	z,SCENE_02
+				cp	3
+				jp	z,SCENE_03
+				cp	4
+				jp	z,SCENE_04
+				cp	5
+				jp	z,SCENE_05
+				cp	6
+				jp	z,SCENE_06
+				cp	7
+				jp	z,SCENE_07
+				cp	8
+				jp	z,SCENE_08
+				cp	9
+				jp	z,SCENE_09
+				cp	10
+				jp	z,SCENE_10
+				cp	11
+				jp	z,SCENE_11
+				cp	12
+				jp	z,SCENE_12
+				cp	13
+				jp	z,SCENE_13
+				cp	14
+				jp	z,SCENE_14
+				cp	15
+				jp	z,SCENE_15
+				ret
+				
+	SCENE_01:		ld	hl,(sine_speed)
+				dec	hl
+				dec	hl
+				dec	hl
+				ld	(sine_speed),hl
+				ld	a,h
+				or	a
+				jr	nz,SCENE_01_RENDER
+				ld	a,l
+				cp	$ca
+				jr	nc,SCENE_01_RENDER
+				jp	SCENE_01_NO_RENDER
+	SCENE_01_RENDER:	call	CRTC_HORIZONTAL_EFFECT
+	SCENE_01_NO_RENDER:	call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_01
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,2
+				call	SCENE_SET
+				ret
+				
+	SCENE_02:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_02
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,3
+				call	SCENE_SET
+				ret
+				
+	SCENE_03:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_03_WAIT
+				call	MUSIC_NEXT
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_03_WAIT:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_03
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,4
+				call	SCENE_SET
+				ret
+				
+	SCENE_04:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_04_WAIT
+				call	MUSIC_NEXT
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_04_WAIT:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_04
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,5
+				call	SCENE_SET
+				call	CLEAR_JUKEBOX
+				call	CLEARFAF		; delete Copyright
+				call	SET_PLASMA_PALETTE
+				ld	a,2			; Graphics 16 for plasma draw area
+				ld	(DRAW_AREA_GR_MODE+1),a
+				;xor	a
+				;ld	(IRQ_PALETTE5+1),a
+				halt
+				;halt
+				ret
+				
+	SCENE_05:		call	GET_SCENE_ELAPSED	; HL = elapsed frames in SCENE_05
+				ld	a,(SCENE_LOCAL_FLAG)
+				cp	1
+				jp	nc,SCENE_05_CHK_S2
+				
+				; --- Stage 0->1: zoom starts at frame 340 ---
+				ld	de,340
+				or	a
+				sbc	hl,de			; CF=1 if elapsed < 340
+				jp	c,SCENE_05_RENDER	; < 340: no zoom, just render
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+				jp	SCENE_05_ZOOM
+				
+	SCENE_05_CHK_S2:	cp	2
+				jp	nc,SCENE_05_CHK_S3
+				
+				; --- Stage 1->2: medium boil at frame 680 ---
+				ld	de,940
+				or	a
+				sbc	hl,de
+				jp	c,SCENE_05_ZOOM		; < 680: just zoom
+				ld	a,2
+				ld	(boil_shift),a
+				ld	a,5
+				ld	(boil_speed_x),a
+				ld	a,4
+				ld	(amplitudex+1),a
+				ld	a,2
+				ld	(SCENE_LOCAL_FLAG),a
+				
+				ld	a,$44			; VÖRÖS
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$14			; SÁRGA
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$54			; SÖTÉT SÁRGA
+				ld	(IRQ_PALETTE3+1),a
+				
+				jp	SCENE_05_ZOOM
+				
+	SCENE_05_CHK_S3:	cp	3
+				jp	nc,SCENE_05_ZOOM
+				
+				; --- Stage 2->3: intense boil+zoom at frame 1430 ---
+				ld	de,1430
+				or	a
+				sbc	hl,de
+				jp	c,SCENE_05_ZOOM		; < 1020: just zoom
+				ld	a,1
+				ld	(boil_shift),a
+				;ld	a,10			; 5
+				;ld	(boil_speed_x),a
+				;ld	a,6			; 4
+				;ld	(boil_speed_y),a
+				ld	a,4
+				ld	(amplitudey+1),a
+				ld	a,2
+				ld	(zoom_osc_speed_x),a
+				ld	(zoom_osc_speed),a
+				ld	a,3
+				ld	(SCENE_LOCAL_FLAG),a
+				
+				ld	a,$55			; FEHÉR
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$44			; VÖRÖS
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$54			; SÁRGA
+				ld	(IRQ_PALETTE3+1),a
+				
+	SCENE_05_ZOOM:						; --- Sinusoidal zoom animation: base_zoom = sin[phase]*14 + 280 ---
+				; Range: ~280 (zoomed in) to ~1944 (zoomed out)
+				ld	a,(zoom_mod_phase)
+				inc	a
+				ld	(zoom_mod_phase),a
+				ld	l,a
+				ld	h,sin / 256		; raw sin[phase], range 0-126
+				ld	a,(hl)
+				ld	l,a
+				ld	h,0			; HL = sin (x1)
+				add	hl,hl			; HL = x2
+				ld	b,h
+				ld	c,l			; BC = x2
+				add	hl,hl			; HL = x4
+				ld	d,h
+				ld	e,l			; DE = x4
+				add	hl,hl			; HL = x8
+				add	hl,de			; HL = x8+x4 = x12
+				add	hl,bc			; HL = x12+x2 = x14
+				add	hl,bc			; HL = x12+x2 = x14
+				add	hl,bc
+				add	hl,bc
+				ld	de,INIT_BASE_ZOOM
+				add	hl,de			; HL = sin*14 + INIT_BASE_ZOOM
+				ld	(base_zoom),hl
+				
+				ld	a,(camy)
+				inc	a
+				ld	(camy),a
+				ld	a,(camx)
+				inc	a
+				inc	a
+				ld	(camx),a
+				
+	SCENE_05_RENDER:	call	Calculate		; calculate and render plasma
+				ld	a,(shift)
+				inc	a
+				and	$3
+				ld	(shift),a
+				call	Plasma
+				
+				call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_05
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,6
+				call	SCENE_SET
+				call	SET_JUKEBOX_PALETTE
+				ld	a,1			; Graphics 4 for jukebox redraw
+				ld	(DRAW_AREA_GR_MODE+1),a
+				halt
+				;halt
+				call	DRAW_JUKEBOX		; redraw jukebox
+				ret
+				
+	SCENE_06:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_06
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,7
+				call	SCENE_SET
+				ret
+				
+	SCENE_07:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_07_WAIT
+				call	MUSIC_NEXT
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_07_WAIT:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_07
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,8
+				call	SCENE_SET
+				call	CLEAR_JUKEBOX
+				call	SET_ROTOZOOM_PALETTE
+				ld	a,2			; Graphics 16 for rotozoom draw area
+				ld	(DRAW_AREA_GR_MODE+1),a
+				halt
+				ret
+				
+	SCENE_08:		call	GET_SCENE_ELAPSED	; HL = elapsed frames in SCENE_08
+				ld	a,(SCENE_LOCAL_FLAG)
+				cp	1
+				jp	nc,SCENE_08_REVERSE
+				ld	de,940			; 940 frames: keep current forward rotation
+				or	a
+				sbc	hl,de
+				jp	c,SCENE_08_FORWARD
+				ld	a,$ff			; reverse rotation, speed = 1
+				ld	(rtz_angle_speed),a
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+				ld	a,$14			; DARK YELLOW
+				ld	(IRQ_PALETTE2+1),a
+				
+				jp	SCENE_08_REVERSE
+	SCENE_08_FORWARD:	ld	a,2			; forward rotation, speed = 2
+				ld	(rtz_angle_speed),a
+	SCENE_08_REVERSE:	call	RTZ_Calculate
+				ld	a,(shift)
+				inc	a
+				and	$03
+				ld	(shift),a
+				call	Plasma
+				call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_08
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,9
+				call	SCENE_SET
+				call	SET_JUKEBOX_PALETTE
+				ld	a,1			; Graphics 4 from this point onward
+				ld	(DRAW_AREA_GR_MODE+1),a
+				halt
+				call	DRAW_JUKEBOX
+				ret
+				
+	SCENE_09:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_09
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,10
+				call	SCENE_SET
+				ret
+				
+	SCENE_10:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_10_WAIT
+				call	MUSIC_NEXT
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_10_WAIT:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_10
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,11
+				call	SCENE_SET
+				call	CLEAR_JUKEBOX
+				call	SET_TUNEL_PALETTE
+				halt
+				ret
+				
+	SCENE_11:		call	GET_SCENE_ELAPSED	; HL = elapsed frames in SCENE_11
+				ld	a,(SCENE_LOCAL_FLAG)
+				cp	2
+				jp	nc,SCENE_11_RENDER	; FLAG >= 2: all phases done
+				cp	1
+				jp	nz,.s11_phase0		; FLAG == 0: first phase check
+				; --- FLAG == 1: wait TUNEL_CENTER_HOLD_FRAMES + 390 then speedup ---
+				ld	de,TUNEL_CENTER_HOLD_FRAMES+390
+				or	a
+				sbc	hl,de
+				jp	c,SCENE_11_RENDER
+				ld	a,$3C
+				ld	(TUNEL_SPEEDUP),a	; self-modify: enable speedup
+				ld	a,$04			; DARK RED
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,2
+				ld	(SCENE_LOCAL_FLAG),a
+				jp	SCENE_11_RENDER
+	.s11_phase0:						; --- FLAG == 0: wait TUNEL_CENTER_HOLD_FRAMES then set center phases ---
+				ld	de,TUNEL_CENTER_HOLD_FRAMES
+				or	a
+				sbc	hl,de
+				jp	c,SCENE_11_RENDER
+				ld	a,TUNEL_CENTER_X_START_PHASE
+				ld	(tunel_center_phase_x),a
+				ld	a,TUNEL_CENTER_Y_START_PHASE
+				ld	(tunel_center_phase_y),a
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_11_RENDER:					; --- select texture based on elapsed frames ---
+				call	GET_SCENE_ELAPSED	; HL = elapsed frames
+				ld	de,TUNEL_TEX_SWITCH_FRAME
+				or	a
+				sbc	hl,de
+				jp	nc,.tunel_main_tex	; elapsed >= 340: use main TUNEL_TEX
+				ld	a,TUNEL_TEX2/256
+				jp	.tunel_tex_set
+	.tunel_main_tex:	
+				ld	a,$14			; DARK YELLOW
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,TUNEL_TEX/256
+				
+	.tunel_tex_set:		ld	(TUNEL_COL_TEXPAGE+1),a	; patch texture page
+				call	TUNEL_Calculate
+				call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_11
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,12
+				call	SCENE_SET
+				call	SET_JUKEBOX_PALETTE
+				halt
+				call	DRAW_JUKEBOX
+				ret
+				
+	SCENE_12:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_12
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,13
+				call	SCENE_SET
+				ret
+				
+	SCENE_13:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_13_WAIT
+				call	MUSIC_NEXT
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_13_WAIT:		call	GET_SCENE_ELAPSED
+				ld	de,SCENE_DUR_13
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,14
+				call	SCENE_SET
+				call	CLEAR_JUKEBOX
+				ret
+				
+	SCENE_14:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_14_RENDER
+				call	SET_TEX4K_PALETTE
+				ld	a,2
+				ld	(TEX4K_STRIDE+1),a	; reset stride to 2 on scene init
+				ld	a,$CB			; restore srl a opcode byte 1
+				ld	(TEX4K_U_SRL),a
+				ld	a,$3F			; restore srl a opcode byte 2
+				ld	(TEX4K_U_SRL+1),a
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_14_RENDER:	call	GET_SCENE_ELAPSED	; HL = elapsed frames
+				push	hl			; save for scene-end check
+				ld	a,(SCENE_LOCAL_FLAG)
+				cp	2
+				jp	z,.scene14_render	; FLAG=2: zoom already active
+				ld	de,640
+				or	a
+				sbc	hl,de
+				jp	c,.scene14_render	; < 640 frames: no zoom yet
+				ld	a,1
+				ld	(TEX4K_STRIDE+1),a	; stride=1 (2x zoom)
+				xor	a			; NOP opcode = $00
+				ld	(TEX4K_U_SRL),a		; patch srl a -> nop byte 1
+				ld	(TEX4K_U_SRL+1),a	; patch srl a -> nop byte 2
+				ld	a,2
+				ld	(SCENE_LOCAL_FLAG),a	; zoom switch done, skip next frames
+	.scene14_render:	call	Tex4K_Calculate
+				pop	hl			; restore elapsed
+				ld	de,SCENE_DUR_14
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,15
+				call	SCENE_SET
+				ret
+				
+	SCENE_15:		ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	nz,SCENE_15_WAIT
+				call	SET_TUNEL_PALETTE
+				ld	a,$90			; U0, U1, VID, U3 - VID accessible at $8000
+				out	($02),a
+				ld	hl,PIC_GREETINGS_ZX7	; source: compressed picture data
+				ld	de,$8000		; dest: video RAM
+				call	ZX7_DECOMPRESS
+				call	RENDER_GREETINGS
+				ld	a,1
+				ld	(SCENE_LOCAL_FLAG),a
+	SCENE_15_WAIT:		call	GET_SCENE_ELAPSED	; HL = elapsed frames
+				ld	a,(SCENE_LOCAL_FLAG)
+				cp	4
+				jp	z,SCENE_15_END_CHECK	; FLAG=4: idle, wait for scene end
+				cp	3
+				jp	z,SCENE_15_FLAG3	; FLAG=3: wait for 1200 frames
+				cp	2
+				jp	z,SCENE_15_FLAG2	; FLAG=2: wait for 800 frames
+				; FLAG=1: wait for 400 frames
+				ld	de,600
+				push	hl
+				or	a
+				sbc	hl,de
+				pop	hl
+				jp	c,SCENE_15_END_CHECK
+				call	SCENE_15_PH_A
+				ld	a,2
+				ld	(SCENE_LOCAL_FLAG),a
+				ret
+	SCENE_15_FLAG2:		ld	de,2000
+				push	hl
+				or	a
+				sbc	hl,de
+				pop	hl
+				jp	c,SCENE_15_END_CHECK
+				call	SCENE_15_PH_B
+				ld	a,3
+				ld	(SCENE_LOCAL_FLAG),a
+				ret
+	SCENE_15_FLAG3:		ld	de,1400
+				push	hl
+				or	a
+				sbc	hl,de
+				pop	hl
+				jp	c,SCENE_15_END_CHECK
+				call	SCENE_15_PH_C
+				ld	a,4
+				ld	(SCENE_LOCAL_FLAG),a
+				ret
+	SCENE_15_END_CHECK:	ld	de,SCENE_DUR_15
+				or	a
+				sbc	hl,de
+				ret	c
+				ld	a,3
+				call	SCENE_SET
+				ret
+				
+	SCENE_SET:		ld	(SCENE_ID),a
+				cp	5			; scene 5 = no border
+				jp	z,SCENE_SET_NO_BORDER
+				cp	8			; scene 8 = no border
+				jp	z,SCENE_SET_NO_BORDER
+				cp	11			; scene 11 = no border
+				jp	z,SCENE_SET_NO_BORDER
+				cp	14			; scene 14 = no border
+				jp	z,SCENE_SET_NO_BORDER
+				call	BORDER_GATE_ENABLE
+				jp	SCENE_SET_CONTINUE
+	SCENE_SET_NO_BORDER:	call	BORDER_GATE_DISABLE
+	SCENE_SET_CONTINUE:	ld	hl,(DEMO_FRAME_CNT)
+				ld	(SCENE_START_FRAME),hl
+				xor	a
+				ld	(SCENE_LOCAL_FLAG),a
+				ret
+				
+	BORDER_GATE_ENABLE:	xor	a
+				ld	(BORDER_RENDER_GATE),a
+				ld	(BORDER_RENDER_GATE+1),a
+				ld	(BORDER_RENDER_GATE+2),a
+				ret
+				
+	BORDER_GATE_DISABLE:	ld	a,$c3			; JP opcode
+				ld	(BORDER_RENDER_GATE),a
+				ld	hl,BORDER_SKIP
+				ld	(BORDER_RENDER_GATE+1),hl
+				ret
+				
+	GET_SCENE_ELAPSED:	ld	hl,(DEMO_FRAME_CNT)
+				ld	de,(SCENE_START_FRAME)
+				or	a
+				sbc	hl,de
+				ret
+				
+	MUSIC_NEXT:		ld	a,(MSC_INDEX)
+				inc	a
+				cp	NUM_OF_MUSIC
+				jp	c,MUSIC_NEXT_SAVE
+				xor	a
+	MUSIC_NEXT_SAVE:	ld	(MSC_INDEX),a
+				call	LOAD_MUSIC
+				ret
+				
+				
+				
+	SCENE06_EFFECT_PLACEHOLDER:	
+				ret
+				
+;----------------------------------------------------------------------------------------------------------------------------------------
+; DRAW AND CLEAR JUKEBOX AREA
+;----------------------------------------------------------------------------------------------------------------------------------------				
+	DRAW_JUKEBOX:		
+				ld	HL,PIC_MAIN_ZX7		; HL-be a tömörített kezdőképernyő memóriacíme                                                                
+				ld	DE,$8000		; DE-be a célmemória címe
+				call	ZX7_DECOMPRESS		; Kép kitömörítése
+				ret
+				
+	CLEAR_JUKEBOX:		
+				ld	a,$90			; lapozási kód: U0, U1, VID, U3;
+				out	($02),a			; Belapozás				
+				ld	hl,$8000		; from video ram
+				ld	bc,$2D00
+	clr_loop:		xor	a
+				ld	(hl),a
+				inc	hl
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,clr_loop
+				ret
+				
+	CLEARFAF:		ld	hl,$8000		; from video ram
+				ld	de,$B980 - 3200
+				ld	bc,640
+				ldir
+				ld	de,$B980
+				ld	bc,640
+				ldir
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; PLASMA EFFECT
+;--------------------------------------------------------------------------------------------------------------------------------------
+	SET_PLASMA_PALETTE:	
+				ld	a,$45			; LILA
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$41			; KÉK
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$55			; FEHÉR
+				ld	(IRQ_PALETTE3+1),a
+				ret
+				
+	SET_JUKEBOX_PALETTE:	
+				ld	a,$05			; SÖTÉT LILA
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$01			; SÖTÉT KÉK
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$55			; FEHÉR
+				ld	(IRQ_PALETTE3+1),a
+				ret
+				
+	SET_ROTOZOOM_PALETTE:	
+				ld	a,$11			; DARK CYAN
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$15			; GREY
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$55			; WHITE
+				ld	(IRQ_PALETTE3+1),a
+				ret
+				
+	SET_TUNEL_PALETTE:	
+				ld	a,$41			; BLUE
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$11			; DARK CYAN
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$55			; WHITE
+				ld	(IRQ_PALETTE3+1),a
+				ret
+				
+	SET_TEX4K_PALETTE:	
+				ld	a,$14			; DARK YELLOW
+				ld	(IRQ_PALETTE2+1),a
+				ld	a,$04			; DARK RED
+				ld	(IRQ_PALETTE1+1),a
+				ld	a,$55			; WHITE
+				ld	(IRQ_PALETTE3+1),a
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; TUNEL EFFECT
+; Precomputed angle_table[32x32] and dist_table[32x32] stored as binary blobs.
+; A 32x21 visible window moves sinusoidally inside the 32x32 source field.
+; For the first TUNEL_CENTER_HOLD_FRAMES frames, the center stays fixed.
+; Per frame: rot_phase+=2, scroll_phase++ (animation)
+; Per pixel: color = tunel_tex[ high(angle[x,y]+rot) | low(dist[x,y]+scroll) ]
+; Memory: tunel_dist_row ($FC00) = dist row (current), tunel_angle_row ($FD00) = angle row (current)
+; tunel_tex[] at TUNEL_TEX (page $24, page-aligned)
+;--------------------------------------------------------------------------------------------------------------------------------------
+	TUNEL_Calculate:	
+				; --- Advance animation phases ---
+				ld	a,(tunel_rot_phase)
+				add	a,2
+				ld	(tunel_rot_phase),a
+				
+				ld	a,(tunel_scroll_phase)
+				inc	a
+	TUNEL_SPEEDUP:		nop				; self-modify to $3c
+				ld	(tunel_scroll_phase),a
+				ld	(TUNEL_ADD_SCR+1),a	; self-modify: add a, scroll_phase
+				
+				ld	a,(tunel_twist_phase)
+				add	a,3
+				ld	(tunel_twist_phase),a
+				
+				ld	a,(SCENE_LOCAL_FLAG)
+				or	a
+				jp	z,.tunel_center_hold
+				
+				ld	a,(tunel_center_phase_x)
+				inc	a
+				ld	(tunel_center_phase_x),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)			; 0..126
+				srl	a
+				srl	a			; 0..31
+				ld	(TUNEL_ADD_X+1),a	; self-modify: X source offset
+				
+				ld	a,(tunel_center_phase_y)
+				inc	a
+				ld	(tunel_center_phase_y),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)			; 0..126
+				srl	a
+				srl	a
+				srl	a			; 0..15
+				cp	12
+				jp	c,.tunel_src_y_ok
+				sub	4			; fold to 0..11, enough for a 21-row window in 32 rows
+	.tunel_src_y_ok		ld	l,a
+				ld	h,0
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl			; HL = source_y_offset * 32
+				ld	b,h
+				ld	c,l
+				jp	.tunel_src_ready
+	.tunel_center_hold	xor	a
+				ld	(TUNEL_ADD_X+1),a	; fixed centered source X during intro hold
+				ld	bc,TUNEL_CENTER_Y_HOLD_OFFSET
+	.tunel_src_ready	
+				
+				; --- Compute dst (same as Plasma/RTZ: shift-based scanline offset) ---
+				ld	a,(shift)
+				inc	a
+				and	$03
+				ld	(shift),a
+				ld	h,a
+				ld	l,0
+				srl	h
+				rr	l
+				ex	de,hl
+				ld	hl,$81C0
+				add	hl,de
+				ld	(dst),hl
+				
+				; --- Render all 21 rows from the current 32x32 source window ---
+				ld	h,b
+				ld	l,c
+				ld	de,TUNEL_ANGLE_TABLE
+				add	hl,de			; HL -> angle table source row
+				push	hl
+				ld	h,b
+				ld	l,c
+				ld	de,TUNEL_DIST_TABLE
+				add	hl,de
+				ex	de,hl			; DE -> dist table source row
+				pop	hl			; HL -> angle table source row
+				ld	a,0
+				ld	(tunel_row),a
+				
+	TUNEL_ROW_LOOP:		
+				; Copy angle row (HL) to tunel_angle_row ($FD00) - 32 bytes
+				push	de			; save dist ptr on stack
+				ld	de,tunel_angle_row
+				ld	bc,32
+				ldir				; HL = angle_ptr+32 (next angle row)
+				; HL = next angle row ptr
+				; stack top: dist ptr for this row
+				
+				; Copy dist row to tunel_dist_row ($FC00) - 32 bytes
+				pop	de			; DE = dist ptr for this row
+				push	hl			; save next angle row ptr on stack
+				ld	h,d			; HL = dist row ptr
+				ld	l,e
+				ld	de,tunel_dist_row
+				ld	bc,32
+				ldir				; HL = dist_ptr+32 (next dist row)
+				ld	d,h			; DE = next dist row ptr
+				ld	e,l
+				pop	hl			; HL = next angle row ptr
+				
+				ld	a,(tunel_row)
+				add	a,a
+				add	a,a
+				add	a,a			; A = row * 8
+				ld	b,a
+				ld	a,(tunel_twist_phase)
+				add	a,b			; A = twist_phase + row*8
+				ld	b,a
+				ld	a,(tunel_rot_phase)
+				add	a,b			; A = rot_phase + row_twist
+				ld	(TUNEL_ADD_ANG+1),a	; self-modify: angle offset for this row
+				
+				; Render one row of 32 pixels (each pixel = 2 bytes in GFX16)
+				; (HL, DE saved; TUNEL_ADD_ANG/SCR already patched)
+				push	hl			; save next angle row ptr
+				push	de			; save next dist row ptr
+				call	Tunel_Render_Row
+				pop	de			; restore next dist row ptr
+				pop	hl			; restore next angle row ptr
+				
+				; Advance dst by 2 scanlines (2*128 = 256 = inc H twice)
+				ld	hl,(dst)
+				inc	h
+				inc	h
+				ld	(dst),hl
+				
+				ld	a,(tunel_row)
+				inc	a
+				ld	(tunel_row),a
+				cp	21
+				jp	nz,TUNEL_ROW_LOOP
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; Tunel_Render_Row - renders 1 row of 32 pixels using 2D tunnel indexing
+; tunel_angle_row (tunel_angle_row/256): angle[0..31] for this row
+; tunel_dist_row  (tunel_dist_row/256):  dist[0..31] for this row
+; dst = target video address
+; Pixel formula: color = tunel_tex[ high(angle[col]+rot_phase+row_twist) | low(dist[col]+scroll_phase) ]
+;--------------------------------------------------------------------------------------------------------------------------------------
+	Tunel_Render_Row:	
+				ld	de,(dst)		; DE = video destination
+				ld	c,0			; C = column index (0..31)
+				
+	Tunel_Col_Loop:		ld	a,c
+	TUNEL_ADD_X:		add	a,0			; A += x source offset (self-modifying immediate)
+				and	$1F			; wrap in 32 columns
+				ld	l,a			; L = shifted source column
+				ld	h,tunel_angle_row/256	; H = angle page ($FD)
+				ld	a,(hl)			; A = angle[col]
+	TUNEL_ADD_ANG:		add	a,0			; A += rot_phase + row_twist (self-modifying immediate)
+				and	$F0			; keep angle high nibble
+				ld	b,a			; B = angle texture coordinate
+				ld	h,tunel_dist_row/256	; H = dist page ($FC)
+				ld	a,(hl)			; A = dist[col]
+	TUNEL_ADD_SCR:		add	a,0			; A += scroll_phase (self-modifying immediate)
+				and	$0F			; keep dist low nibble
+				or	b			; combine angle/dist into 16x16 texture index
+				ld	l,a			; L = texture index
+	TUNEL_COL_TEXPAGE:	ld	h,TUNEL_TEX/256		; self-modify: H = active texture page (TUNEL_TEX or TUNEL_TEX2)
+				ld	a,(hl)			; A = tunnel_tex[index]
+				ld	(de),a
+				inc	de
+				inc	de
+				inc	c			; advance column counter
+				ld	a,c
+				cp	32
+				jp	nz,Tunel_Col_Loop
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; ROTOZOOM EFFECT
+; Uses same Plasma renderer (sinx/siny tables + data[]).
+; sinx[col] = cos(angle)*scale*col + pan_x  (raw phase, no sin transform)
+; siny[row] = sin(angle)*scale*row + pan_y  (raw phase)
+; color = data[sinx[col] + siny[row]] = 1D rotated-and-zoomed texture
+;--------------------------------------------------------------------------------------------------------------------------------------
+	RTZ_Calculate:		
+				; --- Zoom scale from sine oscillator ---
+				ld	a,(rtz_zoom_phase)
+				inc	a
+				ld	(rtz_zoom_phase),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)			; sin[phase], 0..126
+				srl	a			; divide by 2: range 0..63
+				add	a,3			; range 3..66 (min zoom preserved, wider swing)
+				ld	(rtz_zoom_scale),a
+				
+				; --- cos(angle) * scale -> rtz_dx_word ---
+				ld	a,(rtz_angle)
+				add	a,64			; cos = sin[angle+64]
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)			; sin[angle+64] = cos(angle), 0..126
+				sub	63			; center: -63..+63 (signed)
+				ld	e,a			; E = cos_a (low byte)
+				rla				; sign bit to carry
+				sbc	a,a			; A = $00 or $FF (sign extension)
+				ld	d,a			; DE = sign-extended cos_a (-63..+63)
+				ld	a,(rtz_zoom_scale)
+				ld	b,a			; B = loop count (3..18)
+				ld	hl,0
+	RTZ_COS_MUL:		add	hl,de
+				djnz	RTZ_COS_MUL		; HL = cos_a * scale = dx_word
+				ld	(rtz_dx_word),hl
+				
+				; --- sin(angle) * scale -> rtz_dy_word ---
+				ld	a,(rtz_angle)
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)			; sin(angle), 0..126
+				sub	63			; center: -63..+63 (signed)
+				ld	e,a
+				rla
+				sbc	a,a
+				ld	d,a			; DE = sign-extended sin_a
+				ld	a,(rtz_zoom_scale)
+				ld	b,a
+				ld	hl,0
+	RTZ_SIN_MUL:		add	hl,de
+				djnz	RTZ_SIN_MUL		; HL = sin_a * scale = dy_word
+				ld	(rtz_dy_word),hl
+				
+				; --- Fill siny[0..20] with dy_word accumulation ---
+				ld	h,$01			; H = siny page ($0100)
+				ld	a,(rtz_pan_y)
+				ld	ixh,a
+				ld	ixl,0			; IX = pan_y<<8 (start accumulator)
+				ld	de,(rtz_dy_word)
+				ld	l,0			; L = row index (0..20)
+				ld	b,21
+	RTZ_SINY_LOOP:		ld	a,ixh
+				ld	(hl),a
+				inc	l
+				add	ix,de
+				djnz	RTZ_SINY_LOOP
+				
+				; --- Fill sinx[0..63] with dx_word accumulation ---
+				ld	h,$02			; H = sinx page ($0200)
+				ld	a,(rtz_pan_x)
+				ld	ixh,a
+				ld	ixl,0			; IX = pan_x<<8 (start accumulator)
+				ld	de,(rtz_dx_word)
+				ld	l,0			; L = col index (0..63)
+				ld	b,64
+	RTZ_SINX_LOOP:		ld	a,ixh
+				ld	(hl),a
+				inc	l
+				add	ix,de
+				djnz	RTZ_SINX_LOOP
+				
+				; --- Advance rotation angle ---
+				ld	a,(rtz_angle)
+				ld	hl,rtz_angle_speed
+				add	a,(hl)
+				ld	(rtz_angle),a
+				
+				; --- Advance pan (fly-through texture movement) ---
+				ld	a,(rtz_pan_x)
+				inc	a
+				ld	(rtz_pan_x),a
+				ld	a,(rtz_pan_y)
+				inc	a
+				ld	(rtz_pan_y),a
+				
+				; --- Compute dst (same formula as Calculate) ---
+				ld	a,(shift)
+				ld	h,a
+				ld	l,0
+				srl	h
+				rr	l
+				ex	de,hl
+				ld	hl,$81C0
+				add	hl,de
+				ld	(dst),hl
+				ret
+				
+	Calculate:		
+				ld	a,(zoom_phase)
+				ld	hl,zoom_osc_speed
+				add	a,(hl)
+				ld	(zoom_phase),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				
+				ld	l,a
+				rla
+				sbc	a,a
+				ld	h,a
+				
+	amplitudey		ld	b,2
+	.m_loop_y_opt		
+				add	hl,hl
+				dec	b
+				jp	nz,.m_loop_y_opt
+				ld	de,(base_zoom)
+				add	hl,de
+				ld	(zoom_word_y),hl
+				
+				ld	a,(zoom_phase_x)
+				ld	hl,zoom_osc_speed_x
+				add	a,(hl)
+				ld	(zoom_phase_x),a
+				add	a,64
+				
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				
+				ld	l,a
+				rla
+				sbc	a,a
+				ld	h,a
+				
+	amplitudex:		ld	b,2
+	.m_loop_x_opt		
+				add	hl,hl
+				dec	b
+				jp	nz,.m_loop_x_opt
+				ld	de,(base_zoom)
+				add	hl,de
+				ld	(zoom_word_x),hl
+				
+				ld	a,(boil_phase_y)
+				ld	hl,boil_speed_y
+				add	a,(hl)
+				ld	(boil_phase_y),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				
+				ld	b,a
+				ld	a,(boil_shift)
+				and	a
+				jp	z,.store_boil_y
+				ld	c,a
+				ld	a,b
+	.shift_y_opt		
+				sra	a
+				dec	c
+				jp	nz,.shift_y_opt
+	.store_boil_y		
+				ld	(y_offset_temp),a
+				
+				ld	a,(boil_phase_x)
+				ld	hl,boil_speed_x
+				add	a,(hl)
+				ld	(boil_phase_x),a
+				add	a,32
+				
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				
+				ld	b,a
+				ld	a,(boil_shift)
+				and	a
+				jp	z,.store_boil_x
+				ld	c,a
+				ld	a,b
+	.shift_x_opt		
+				sra	a
+				dec	c
+				jp	nz,.shift_x_opt
+	.store_boil_x		
+				ld	(x_offset_temp),a
+				
+				ld	bc,siny
+				exx
+				
+				ld	de,(zoom_word_y)
+				ld	a,(camy)
+				ld	hl,y_offset_temp
+				add	a,(hl)
+				ld	ixh,a
+				ld	ixl,0
+				
+				ld	h,sin / 256
+				ld	b,21
+				
+	.yloop_fixed		
+				ld	a,ixh
+				ld	l,a
+				ld	a,(hl)
+				exx
+				ld	(bc),a
+				inc	bc
+				exx
+				add	ix,de
+				dec	b
+				jp	nz,.yloop_fixed
+				
+				ld	bc,sinx
+				exx
+				
+				ld	de,(zoom_word_x)
+				ld	a,(camx)
+				ld	hl,x_offset_temp
+				add	a,(hl)
+				ld	ixh,a
+				ld	ixl,0
+				
+				ld	h,sin / 256
+				ld	b,64
+				
+	.xloop_fixed		
+				ld	a,ixh
+				ld	l,a
+				ld	a,(hl)
+				exx
+				ld	(bc),a
+				inc	bc
+				exx
+				add	ix,de
+				dec	b
+				jp	nz,.xloop_fixed
+				
+				ld	a,(shift)
+				ld	h,a
+				ld	l,0
+				srl	h
+				rr	l
+				
+				ex	de,hl
+				ld	hl,$81C0
+				add	hl,de
+				ld	(dst),hl
+				ret
+				
+	Plasma:			
+				ld	a,0
+				ld	(y),a
+				
+	Plasma_Line_Loop:	
+				ld	a,(y)
+				ld	e,a
+				ld	d,0
+				ld	hl,siny
+				add	hl,de
+				ld	a,(hl)
+				ld	iyl,a
+				
+				ld	de,(dst)
+				ld	bc,sinx
+				ld	hl,data
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+				ld	hl,(dst)
+				inc	h
+				inc	h
+				ld	(dst),hl
+				
+				ld	a,(y)
+				inc	a
+				ld	(y),a
+				cp	$15
+				jp	nz,Plasma_Line_Loop
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; TEXTURE FLYTHROUGH EFFECT (SCENE 14)
+; 8KB GFX4 texture at TEX4K ($5E00-$7DFF): 128 byte-cols x 64 rows (512x64 pixels).
+; 2 rows share one 256-byte page: H = TEX4K_BASE + row/2,  L = (row&1)*128 + col
+; Camera pans sinusoidally:
+;   scroll_u = sin[tex4k_wave_phase] >> 1   (0..63, U-axis) stride=2 so max L = 62+63=125 < 128, no seam
+;   scroll_v = sin[tex4k_v_tick] >> 1       (0..63, V-axis)
+; Render: 21 rows x 32 cols, fixed dst = $81C0 (no shift trick)
+;--------------------------------------------------------------------------------------------------------------------------------------
+	Tex4K_Calculate:	
+				; --- sinusoidal U scroll: phase advances 2/frame ---
+				ld	a,(tex4k_wave_phase)
+				add	a,2
+				ld	(tex4k_wave_phase),a
+				ld	l,a
+				ld	h,sin/256
+				ld	a,(hl)			; sin 0..126
+	TEX4K_U_SRL:		srl	a			; >> 1 = 0..63: self-modifying, patched to NOP NOP on zoom
+				ld	(tex4k_scroll_u),a	; U = 0..63
+				
+				; --- sinusoidal V scroll: phase advances 1/frame ---
+				ld	a,(tex4k_v_tick)
+				inc	a
+				ld	(tex4k_v_tick),a
+				ld	l,a
+				ld	h,sin/256
+				ld	a,(hl)			; sin 0..126
+				srl	a			; 0..63 (fits 64-row texture)
+				ld	(tex4k_scroll_v),a
+				
+				; --- compute dst: same shift trick as tunnel/plasma ---
+				; cycles through 4 scanline offsets (0, $80, $100, $180) from $81C0
+				; each rendered byte appears on 4 different scanlines = tall chunky pixels
+				ld	a,(shift)
+				inc	a
+				and	$03
+				ld	(shift),a
+				ld	h,a
+				ld	l,0
+				srl	h
+				rr	l			; HL = shift*128: 0, $80, $100, $180
+				ex	de,hl
+				ld	hl,$81C0
+				add	hl,de
+				ld	(dst),hl
+				
+				; --- render 21 rows ---
+				xor	a
+				ld	(tex4k_row),a
+	Tex4K_Row_Loop:		
+				; effective_tex_row = (scroll_v + render_row) & $3F
+				ld	a,(tex4k_scroll_v)
+				ld	b,a
+				ld	a,(tex4k_row)
+				add	a,b
+				and	$3F			; 64-row wrap
+				
+				; H = TEX4K_BASE + effective_row/2
+				ld	b,a			; save effective_row
+				srl	a			; A = row/2, carry = row&1
+				add	a,TEX4K_BASE
+				ld	(TEX4K_ROW_PAGE+1),a	; self-modify H
+				
+				; L base offset: (row&1)*128 = 0 or $80
+				ld	a,b
+				and	1			; 0 or 1
+				rrca				; 0 or $80
+				ld	(TEX4K_ROW_L_BASE+1),a	; self-modify OR mask for L
+				
+				; pan_u is the same for every column in this row (start position in accumulator loop)
+				ld	a,(tex4k_scroll_u)
+				ld	(TEX4K_START+1),a	; self-modify: accumulator start = scroll_u
+				
+				call	Tex4K_Render_Row
+				
+				; advance dst by 2 scanlines (+$200)
+				ld	hl,(dst)
+				inc	h
+				inc	h
+				ld	(dst),hl
+				
+				ld	a,(tex4k_row)
+				inc	a
+				ld	(tex4k_row),a
+				cp	21
+				jp	nz,Tex4K_Row_Loop
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------
+; Tex4K_Render_Row - renders 1 row of 32 pixels from the 8KB texture
+; Texture: 128 bytes/row x 64 rows. 2 rows per 256-byte page.
+; TEX4K_ROW_PAGE+1:   H = TEX4K_BASE + effective_row/2  (self-modifying)
+; TEX4K_ROW_L_BASE+1: L base = 0 or $80 (row parity, self-modifying)
+; TEX4K_PAN_U+1:      pan_u + wave offset, pre-masked to 0..127 (self-modifying)
+; Accumulator-based: C starts at scroll_u, advances by TEX4K_STRIDE each column.
+; stride=2 (default scroll), stride=4/8 (zoomed out), stride=1 (zoomed in/close-up).
+; and $7F ensures L stays 0..127, no seam possible within 32 cols.
+;--------------------------------------------------------------------------------------------------------------------------------------
+	Tex4K_Render_Row:	
+				ld	de,(dst)
+	TEX4K_START:		ld	c,0			; self-modify: start = tex4k_scroll_u
+				ld	b,32			; 32 columns
+	Tex4K_Col_Loop:		ld	a,c
+				and	$7F			; wrap to 0..127
+	TEX4K_ROW_L_BASE:	or	$00			; row parity offset: 0 or $80 (self-modifying)
+				ld	l,a
+	TEX4K_ROW_PAGE:		ld	h,TEX4K_BASE		; texture row page (self-modifying immediate)
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de			; skip alternate byte (chunky pixels)
+				ld	a,c
+	TEX4K_STRIDE:		add	a,2			; self-modify: stride 1=close, 2=normal, 4/8=far
+				ld	c,a
+				djnz	Tex4K_Col_Loop
+				ret
+				
+	INIT_BASE_ZOOM		equ	400
+				
+	val:			db	0
+	dst:			dw	0
+	x:			db	0
+	y:			db	0
+	camy			db	0
+	camx			db	0
+	shift:			db	0
+				
+	boil_shift		db	3			;original: 2
+	boil_phase_y		db	0
+	boil_speed_y		db	1			;original: 1
+	boil_phase_x		db	0
+	boil_speed_x		db	2			;original: 2
+				
+	base_zoom		dw	INIT_BASE_ZOOM
+	zoom_word_y		dw	0
+	zoom_word_x		dw	0
+	zoom_osc_speed		db	1
+	zoom_phase		db	0
+	zoom_osc_speed_x	db	1
+	zoom_phase_x		db	0
+	zoom_mod_phase		db	212			; Phase at which sin[212]*14+180=278 ~= INIT_BASE_ZOOM (no jump on scene start)
+	x_offset_temp		db	0
+	y_offset_temp		db	0
+				
+; --- Rotozoom variables ---
+	rtz_angle		db	0
+	rtz_angle_speed		db	2			; rotation speed (full rotation in ~128 frames)
+	rtz_zoom_phase		db	212			; zoom oscillator start phase (no jump on scene start)
+	rtz_zoom_scale		db	4			; current zoom scale multiplier (3..18)
+	rtz_pan_x		db	0			; texture pan X (fly-through)
+	rtz_pan_y		db	0			; texture pan Y
+	rtz_dx_word		dw	0			; U-step per column (cos*scale, 16-bit fixed point)
+	rtz_dy_word		dw	0			; V-step per row (sin*scale, 16-bit fixed point)
+				
+; --- Tunnel variables ---
+	TUNEL_CENTER_HOLD_FRAMES	equ	510		; 600 frames: static center intro
+	TUNEL_CENTER_X_START_PHASE	equ	$C5		; centered X start for smooth release
+	TUNEL_CENTER_Y_START_PHASE	equ	$8F		; centered Y start for smooth release
+	TUNEL_CENTER_Y_HOLD_OFFSET	equ	$00A0		; centered 21-row window inside 32 rows
+	TUNEL_TEX_SWITCH_FRAME	equ	260			; frames 0..359: TUNEL_TEX2, 360+: TUNEL_TEX
+				
+	tunel_rot_phase		db	0			; rotation phase (angle offset)
+	tunel_scroll_phase	db	0			; scroll phase (dist offset, fly-in)
+	tunel_twist_phase	db	0			; helical twist phase
+	tunel_center_phase_x	db	0			; horizontal source window phase
+	tunel_center_phase_y	db	64			; vertical source window phase (quadrature)
+	tunel_row		db	0			; current row index (loop counter)
+				
+; --- Tex4K variables ---
+	TEX4K_BASE		equ	TEX4K / 256		; texture base page ($5F00-$7EFF, 8KB, 64 rows)
+	tex4k_scroll_u		db	0			; U scroll 0..63 (sin-based, stride=2 = no seam)
+	tex4k_scroll_v		db	0			; V scroll 0..63 (64-row texture)
+	tex4k_v_tick		db	0			; V phase counter (sin index)
+	tex4k_wave_phase	db	0			; U phase counter (sin index)
+	tex4k_row		db	0			; current render row index (loop counter)
+	tunel_dist_row		equ	$0100			; U3 top: dist row buffer (32 bytes, page-aligned) DO NOT CHANGE $0100
+	tunel_angle_row		equ	$0200			; U3 top: angle row buffer (32 bytes, page-aligned)  DO NOT CHNAGE  $0200
+				
+	siny			equ	$0100
+	sinx			equ	$0200
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  
+	COUNT_DOWN_WHITE:	
+				ld	a,$ff			; entry point with white border
+				out	(0),a
+				
+				nop				; timing
+				nop
+				nop
+				nop
+				
+				ld	b,LINE_HEIGHT
+				
+	COUNT_DOWN:		ld	a,b
+				ld	(downcounter+1),a
+	downcounter:		ld	a,1
+				dec	a
+				ld	(downcounter+1),a
+				jp	nz,downcounter
+				ret
+				
+	COLOR_BORDER:		
+				ld	hl,VOL_TO_BORDER_MAP
+				ld	d,0
+				ld	e,a
+				add	hl,de
+				ld	a,(hl)
+				out	($0),a
+				ret
+				
+	VOL_TO_BORDER_MAP	db	0, 0, 2, 2, 8, 8, 10, 10, 32, 32, 34, 34, 40, 40, 42, 42
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  
+; HORIZONTAL SYNC EFFECT
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  
+				
+	sine_phase:		dw	$0000
+; Adjust sine_speed to change the frequency of the movement
+; $0100 = 1 table step per frame
+; $0180 = 1.5 table steps per frame
+; $00C0 = 0.75 table steps per frame
+	sine_speed:		dw	$0600
+	Horizontal_Sync_CRTC:	db	$46
+				
+	CRTC_HORIZONTAL_EFFECT:	
+; Update 16-bit phase accumulator
+				ld	hl,(sine_phase)
+				ld	de,(sine_speed)
+				add	hl,de
+				ld	(sine_phase),hl
+				
+; Get high byte of phase for table index
+				ld	a,h
+; Mask to $3F (63) for the 64-byte table
+				and	$3F
+				ld	e,a
+				ld	d,$00
+				ld	hl,sine_table
+				add	hl,de
+				ld	a,(hl)
+				
+; Add base CRTC value
+				add	a,$46
+				ld	(Horizontal_Sync_CRTC),a
+				call	SetCRTCHorizontalSync
+				ret
+				
+	SetCRTCHorizontalSync:	
+				ld	a,$02
+				out	($70),a
+				ld	a,(Horizontal_Sync_CRTC)
+				out	($71),a
+				ret
+				
+; 64-byte sine table (Amplitude: 0 to $0C)
+	sine_table:		
+				db	$06, $07, $07, $08, $08, $09, $09, $0A
+				db	$0A, $0B, $0B, $0B, $0C, $0C, $0C, $0C
+				db	$0C, $0C, $0C, $0C, $0B, $0B, $0B, $0A
+				db	$0A, $09, $09, $08, $08, $07, $07, $06
+				db	$06, $05, $05, $04, $04, $03, $03, $02
+				db	$02, $01, $01, $01, $00, $00, $00, $00
+				db	$00, $00, $00, $00, $01, $01, $01, $02
+				db	$02, $03, $03, $04, $04, $05, $05, $06
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  				
+	LOAD_MUSIC:		
+				xor	a
+				ld	(MUSIC_ENABLE_FLAG),a
+				halt				; wait for disabling music by interrupt based on the flag
+				halt
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				
+				ld	a,(MSC_INDEX)		; get ZX7 file by index
+				cp	0
+				jp	z,MSC01
+				cp	1
+				jp	z,MSC02
+				cp	2
+				jp	z,MSC03
+				cp	3
+				jp	z,MSC04
+				cp	4
+				jp	z,MSC05
+	MSC06:			ld	hl,TEXT06
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_06_ZX7
+				jp	DO_LOAD
+	MSC05:			ld	hl,TEXT05
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_05_ZX7
+				jp	DO_LOAD
+	MSC04:			ld	hl,TEXT04
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_04_ZX7
+				jp	DO_LOAD
+	MSC01:			ld	hl,TEXT01
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_01_ZX7
+				jp	DO_LOAD
+	MSC02:			ld	hl,TEXT02
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_02_ZX7
+				jp	DO_LOAD
+	MSC03:			ld	hl,TEXT03
+				ld	(MSC_NAME_PTR+1),hl
+				ld	HL,MUSIC_03_ZX7
+				
+				
+	DO_LOAD:		ld	DE,SONG_DATA
+				call	ZX7_DECOMPRESS
+				call	INIT_PLAYER
+				
+; MUSIC NAME
+				ld	A,$50			; lapozási kód: U0, U1, U2, SYS
+				out	($02),a			; Belapozás
+				
+				ld	a,3			; set ink to palette 3
+				ld	(2893),a
+				ld	bc,$0116		; B = oszlop(1-32): 1, C = sor(1-24): 22
+				rst	$30
+				db	$23
+				
+				ld	bc,32
+	MSC_NAME_PTR:		ld	de,TEXT01
+				rst	$30
+				db	$22
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				ld	a,1
+				ld	(MUSIC_ENABLE_FLAG),a
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  				
+	END_OF_APP:		di
+				ld	a,(IT_HANDLER_1)
+				ld	(0038H),a		; RESTORE IT HANDLER
+				ld	(IT_HANDLER_1),A
+				ld	HL,(IT_HANDLER_2)
+				ld	(0039H),HL
+				ei
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  				
+; GREETINGS TEXT
+;--------------------------------------------------------------------------------------------------------------------------------------                 				                                  				
+	HALT_ON_TOP:		halt
+				ld	a,(IT_IDX)		; wait for non music IT (20ms)
+				or	a
+				jp	nz,HALT_ON_TOP
+				ret
+				
+	RENDER_GREETINGS:	
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				ld	ix,GREETING_PTRS	; IX = pointer table
+				ld	b,5
+				ld	hl,$0114		; col=1, row=20
+				
+	char_loop:		call	HALT_ON_TOP
+				push	bc
+				push	hl
+				ld	b,h			; B = col
+				ld	c,l			; C = row
+				call	RST30DB3		; compute VRAM_POSITION from BC
+				ld	e,(ix+0)		; DE = text pointer from table
+				ld	d,(ix+1)
+				call	RST30DB2		; write text (stops at db 0 terminator)
+				pop	hl
+				inc	l			; next row
+				inc	ix
+				inc	ix			; advance pointer table (2 bytes per entry)
+				pop	bc
+				djnz	char_loop
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				call	INIT_MUSICBY		; decompress TEXT
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ret
+; ===========================================================================
+; INIT PLAYER
+; ===========================================================================
+	INIT_PLAYER:		
+				call	ResetSAA
+				
+; -- 1. Setup Base Pointers --
+				ld	hl,SONG_DATA
+				ld	(VAR_MUSIC_BASE),hl
+				
+; Get Pattern List Pointer (Offset 9)
+				ld	de,9
+				add	hl,de
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_PATS_PTR),hl
+				
+; Get Position Data Pointer (Offset 11)
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	de,11
+				add	hl,de
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				
+; -- 2. Initialize Variables --
+				ld	a,1
+				ld	(VAR_POS_ROWS_LEFT),a
+				ld	(VAR_CUR_TICK),a
+				
+; Clear Channels
+				ld	hl,CH_DATA
+				ld	b,6 * CH_STRUCT_SIZE
+				xor	a
+	FillChannelMem:		
+				ld	(hl),a
+				inc	hl
+				djnz	FillChannelMem
+				
+				ld	ix,CH_DATA
+				ld	de,CH_STRUCT_SIZE
+				ld	b,6
+	InitVols:		
+				ld	(ix+O_PAT_VOL_L),0	; Default L attenuation = 0
+				ld	(ix+O_PAT_VOL_R),0	; Default R attenuation = 0
+				add	ix,de
+				djnz	InitVols
+				
+				ret
+				
+; ===========================================================================
+; PlayFrame
+; ===========================================================================
+	PlayFrame:		
+				ld	a,(VAR_CUR_TICK)
+				dec	a
+				ld	(VAR_CUR_TICK),a
+				jr	nz,UpdateEffects
+				
+; --- New Row Logic ---
+				ld	hl,VAR_POS_ROWS_LEFT
+				dec	(hl)
+				jr	nz,SamePosition
+				
+				call	UpdatePosition
+				
+	SamePosition:		
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	(VAR_CUR_TICK),a
+				
+				call	ProcessRow
+				
+	UpdateEffects:		
+				call	ProcessEffects
+				call	UpdateSAA_Registers
+				
+				ret
+				
+; ===========================================================================
+; UpdatePosition
+; ===========================================================================
+	UpdatePosition:		
+				ld	hl,(VAR_POS_PTR)
+				
+; Read Length (Byte 0)
+				ld	a,(hl)
+				or	a
+				jr	z,HandlePosLoop
+				
+				ld	(VAR_POS_ROWS_LEFT),a
+				inc	hl
+				
+; Read Speed (Byte 1)
+				ld	a,(hl)
+				ld	(VAR_GLOBAL_SPEED),a
+				inc	hl
+				
+				call	ReloadPatterns
+				
+; Advance Position Pointer by 14 bytes (2 header + 6*2 channel data)
+				ld	hl,(VAR_POS_PTR)
+				ld	de,14
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				ret
+				
+	HandlePosLoop:		
+				inc	hl
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				
+				ld	a,d
+				or	e
+				jr	z,StopMusic
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de
+				ld	(VAR_POS_PTR),hl
+				jp	UpdatePosition
+				
+	StopMusic:		
+				ld	a,64
+				ld	(VAR_POS_ROWS_LEFT),a
+				ret
+				
+; ===========================================================================
+; ReloadPatterns
+; ===========================================================================
+	ReloadPatterns:		
+				ld	ix,CH_DATA
+				ld	b,6
+				
+	PatLoop:		
+				push	hl
+				
+				ld	a,(hl)			; Pattern Number (1-based; 0 = no pattern)
+				inc	hl
+				ld	c,(hl)			; Transpose (signed byte)
+				
+				or	a			; Check for 0 = no pattern
+				jr	z,EmptyPat		; If 0, skip to EmptyPat
+				
+				ld	l,a
+				ld	h,0
+				add	hl,hl			; x2 (entry is a WORD)
+				ld	de,(VAR_PATS_PTR)
+				add	hl,de			; HL = address of pattern pointer
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = offset of pattern data
+				
+				ld	a,d
+				or	e
+				jr	z,EmptyPat
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute address
+				jr	SavePatPtr
+				
+	EmptyPat:		
+				ld	hl,0
+				
+	SavePatPtr:		
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				ld	(ix+O_WAIT),0
+				ld	(ix+O_POS_TRANSPOSE),c
+				
+				pop	hl
+				inc	hl
+				inc	hl
+				
+				ld	de,CH_STRUCT_SIZE
+				add	ix,de
+				djnz	PatLoop
+				ret
+				
+; ===========================================================================
+; ProcessRow
+; ===========================================================================
+	ProcessRow:		
+				ld	ix,CH_DATA
+				ld	b,6
+				
+	RowLoop:		
+				push	bc
+				
+				ld	a,(ix+O_WAIT)
+				or	a
+				jr	z,FetchNext
+				dec	(ix+O_WAIT)
+				jp	NextRowCh
+				
+	FetchNext:		
+				ld	l,(ix+O_PTR_L)
+				ld	h,(ix+O_PTR_H)
+				ld	a,h
+				or	l
+				jp	z,NextRowCh
+				
+				ld	a,(hl)
+				inc	hl
+				
+				bit	7,a
+				jr	z,HandleNote
+				
+; --- RLE / End ---
+				and	$7F
+				cp	127
+				jr	z,PatternEnd
+				
+				ld	(ix+O_WAIT),a		; Wait counter saved as-is
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				jp	NextRowCh
+				
+	PatternEnd:		
+				ld	(ix+O_PTR_L),0
+				ld	(ix+O_PTR_H),0
+				jp	NextRowCh
+				
+	HandleNote:		
+				or	a
+				jr	z,HandleFlags
+				
+				cp	$7f			; 127 = Release
+				jr	z,HandleRelease
+				
+				cp	97			; 97 = Tie (Sustain)
+				jr	z,HandleFlags		; Ignore, do not rewind pointers
+				
+				cp	98			; Invalid notes
+				jr	nc,HandleFlags
+				
+				push	af			; Save new note
+				ld	a,(ix+O_NOTE)
+				ld	(VAR_TEMP_NOTE),a	; Save old note for glissando
+				pop	af			; Restore new note
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_NOTE_TRIG),1	; Set trigger for envelope
+				ld	(ix+O_RELEASED),0	; Clear release flag
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_CMD_PHASE),0
+				ld	e,(ix+O_SAMP_BASE_L)
+				ld	d,(ix+O_SAMP_BASE_H)
+				ld	(ix+O_SAMP_PTR_L),e
+				ld	(ix+O_SAMP_PTR_H),d
+				
+				ld	e,(ix+O_ORN_BASE_L)
+				ld	d,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),e
+				ld	(ix+O_ORN_PTR_H),d
+				
+				jr	HandleFlags
+				
+	HandleRelease:		
+				ld	a,(ix+O_RELEASABLE)
+				or	a
+				jr	z,HardRelease		; Not releasable: hard stop
+				ld	a,(ix+O_RELEASED)
+				or	a
+				jr	nz,HardRelease		; Already released: hard stop
+				; Soft release: switch to release section of sample
+				ld	(ix+O_RELEASED),1
+				jp	HandleFlags
+	HardRelease:		
+				xor	a
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_SAMP_PTR_L),a	; Null ptr: ProcessSample silences channel
+				ld	(ix+O_SAMP_PTR_H),a
+				
+	HandleFlags:		
+				ld	b,0
+				ld	a,(hl)
+				inc	hl
+				ld	c,a
+				
+; Sample
+				and	$1F
+				jr	z,CheckN
+				ld	(ix+O_SAMP_NUM),a
+				ld	(ix+O_NOTE_TRIG),1	; Trigger envelope on instrument change
+				call	LoadSamplePtr
+				
+	CheckN:			
+				bit	5,c			; Bit 5: If 1, skip reading Cmd+Orn byte
+				jr	nz,SkipCmdOrn
+				
+; Read Byte 3 (Cmd + Orn)
+				ld	a,(hl)
+				inc	hl
+				ld	d,a
+				
+; Ornament
+				and	$0F
+				jr	z,CheckCmd
+				
+				ld	(ix+O_ORN_NUM),a
+				call	LoadOrnPtr
+				
+	CheckCmd:		
+				ld	a,d
+				and	$F0
+				jr	z,ClearCmd
+				rrca
+				rrca
+				rrca
+				rrca
+				ld	b,a			; Save new command to B
+				ld	(ix+O_CMD),a
+				cp	$03
+				call	z,GlissandoInit
+				jr	CheckP
+				
+	SkipCmdOrn:						; N-flag set: Cmd+Orn byte omitted, previous command state preserved.
+				jr	CheckP
+				
+	ClearCmd:		
+				ld	(ix+O_CMD),0
+				
+	CheckP:			
+				bit	6,c			; Bit 6: If 1, clear Ornament (orn_release)
+				jr	z,CheckV
+				xor	a
+				ld	(ix+O_ORN_NUM),a
+				ld	(ix+O_ORN_OFFSET),a
+				call	LoadOrnPtr		; Reset orn pointer to orn[0] (clear stale ptr, JS: pp.orn=ornaments[0])
+; If active command is ornament-specific (cmd=6 or cmd=7), clear it too.
+; These commands directly manipulate the ornament; keeping them active after
+; orn_release would cause them to run on ornaments[0] (empty ornament).
+				ld	a,(ix+O_CMD)
+				cp	$06
+				jr	z,ClearOrnCmd
+				cp	$07
+				jr	nz,CheckV
+	ClearOrnCmd:		
+				xor	a
+				ld	(ix+O_CMD),a
+				ld	(ix+O_CMD_DAT),a
+				
+	CheckV:			
+				bit	7,c			; Bit 7: If 1, read Volume byte
+				jr	z,CheckCmdData
+				
+; Read Volume Byte
+				ld	a,(hl)
+				inc	hl
+				ld	e,a
+				and	$0F
+				xor	$0F
+				ld	(ix+O_PAT_VOL_L),a
+				ld	a,e
+				rrca
+				rrca
+				rrca
+				rrca
+				and	$0F
+				xor	$0F
+				ld	(ix+O_PAT_VOL_R),a
+				
+	CheckCmdData:		
+; ONLY read command data if a NEW command was declared in this row (B > 0)
+				ld	a,b
+				or	a
+				jr	z,SaveRowPtr
+				
+				cp	$0B			; Break command takes 16-bit data
+				jr	z,CmdWord
+				
+; Read 8-bit command data
+				ld	a,(hl)
+				inc	hl
+				ld	(ix+O_CMD_DAT),a
+				jr	SaveRowPtr
+				
+	CmdWord:		
+; Read 16-bit command data
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				inc	hl
+				ld	(ix+O_CMD_DAT16),e
+				ld	(ix+O_CMD_DAT16_H),d
+				
+	SaveRowPtr:		
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				
+	NextRowCh:		
+				ld	de,CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	b
+				jp	nz,RowLoop
+				ret
+				
+; ===========================================================================
+; Helper: Load Sample Pointer
+; ===========================================================================
+	LoadSamplePtr:		
+				push	hl
+				push	bc
+				push	de
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	bc,5
+				add	hl,bc
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = Sample List offset
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute Sample List address
+				
+				ld	a,(ix+O_SAMP_NUM)
+				; Pointer list already contains sample[0] as the empty sample entry.
+				
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				add	hl,de			; HL += SAMP_NUM * 2
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = sample data offset
+				
+; Empty sample check: offset $0000 means no data
+				ld	a,d
+				or	e
+				jr	z,SmpEmpty		; Zero offset: no sample data
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute sample data address
+				
+; Check for releasable sample marker ($FF only; $80 = end-of-sample ctrl byte)
+				ld	(ix+O_RELEASABLE),0	; Default: not releasable
+				ld	a,(hl)
+				cp	$FF
+				jr	nz,NoSmpRel
+				ld	(ix+O_RELEASABLE),1	; Releasable sample detected
+				inc	hl			; Skip $FF marker
+	NoSmpRel:		
+				jr	SmpSave
+				
+	SmpEmpty:		
+				ld	(ix+O_RELEASABLE),0	; Empty sample: not releasable
+				ld	hl,0			; Set pointer explicitly to 0
+				
+	SmpSave:		
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ld	(ix+O_SAMP_BASE_L),l
+				ld	(ix+O_SAMP_BASE_H),h
+				ld	(ix+O_RELEASED),0	; Clear released flag on sample load
+				
+				pop	de
+				pop	bc
+				pop	hl
+				ret
+				
+; ===========================================================================
+; Helper: Load Ornament Pointer
+; ===========================================================================
+	LoadOrnPtr:		
+				push	hl
+				push	bc
+				push	de
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				ld	bc,7
+				add	hl,bc
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = Ornament List offset
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute Ornament List address
+				
+				ld	a,(ix+O_ORN_NUM)
+				; Pointer list already contains ornament[0] as the empty ornament entry.
+				
+				
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				add	hl,de			; HL += ORN_NUM * 2
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)			; DE = ornament data offset
+				
+; Empty ornament check: offset $0000 means no data
+				ld	a,d
+				or	e
+				jr	z,OrnEmpty		; Zero offset: no ornament data
+				
+				ld	hl,(VAR_MUSIC_BASE)
+				add	hl,de			; HL = absolute ornament data address
+				jr	OrnSave
+				
+	OrnEmpty:		
+				ld	hl,0			; Set pointer explicitly to 0
+				
+	OrnSave:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_ORN_BASE_L),l
+				ld	(ix+O_ORN_BASE_H),h
+				
+				pop	de
+				pop	bc
+				pop	hl
+				ret
+				
+; ===========================================================================
+; ProcessEffects
+; ===========================================================================
+	ProcessEffects:		
+				xor	a
+				ld	(VAR_SAA_NOISE_FREQ),a
+				ld	ix,CH_DATA
+				ld	de,5 * CH_STRUCT_SIZE
+				add	ix,de
+				ld	b,6
+				ld	c,5
+	FxLoop:			
+				ld	a,c
+				ld	(VAR_CH_IDX),a
+				
+				push	bc
+				
+				ld	a,(ix+O_CMD)
+				or	a
+				call	nz,RunCommand
+				
+				call	ProcessSample
+				call	ProcessOrnament
+				
+				ld	de,$FFDB		; -CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	c
+				djnz	FxLoop
+				ret
+				
+; ===========================================================================
+; Run Command
+; ===========================================================================
+	RunCommand:		
+				cp	$01			; Portamento Up
+				jp	z,CmdPortamento
+				cp	$02			; Portamento Down
+				jp	z,CmdPortamento
+				cp	$03			; Glissando
+				jp	z,CmdGlissando
+				cp	$08			; Delay Sample
+				jp	z,CmdDelaySample
+				cp	$0F
+				jr	z,CmdSpeed
+				cp	$0B
+				jr	z,CmdBreak
+				cp	$0E			; Check Envelope command
+				jr	z,CmdEnv
+				cp	$06			; Delay Ornament
+				jr	z,CmdDelayOrn
+				cp	$07			; Set Ornament Offset
+				jp	z,CmdOrnOffset
+				ret
+				
+	CmdSpeed:		
+				ld	a,(ix+O_CMD_DAT)
+				; No masking: full byte stored (supports swing speed >= $20)
+				ld	(VAR_GLOBAL_SPEED),a
+				ld	(ix+O_CMD),0		; Speed cmd is one-shot (JS: pp.cmd=0 after speed change)
+				ret
+				
+	CmdBreak:		
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	e,a
+				ld	a,(VAR_CUR_TICK)
+				cp	e
+				ret	nz			; Execute break only on first tick of the row
+				
+				ld	l,(ix+O_PTR_L)
+				ld	h,(ix+O_PTR_H)
+				ld	e,(ix+O_CMD_DAT16)
+				ld	d,(ix+O_CMD_DAT16_H)
+				add	hl,de
+				ld	(ix+O_PTR_L),l
+				ld	(ix+O_PTR_H),h
+				ld	(ix+O_CMD),0
+				ret
+				
+	CmdEnv:			
+; Execute only on the first tick of the row.
+				ld	a,(VAR_GLOBAL_SPEED)
+				ld	e,a
+				ld	a,(VAR_CUR_TICK)
+				cp	e
+				ret	nz			; Not first tick: skip (do not touch hardware)
+				
+				ld	(ix+O_CMD),0		; One-shot command: clear immediately after execution
+				
+				ld	a,(ix+O_CMD_DAT)
+				ld	e,a
+				bit	4,a
+				jr	nz,KeepBaseTone
+				ld	(ix+O_PAT_VOL_L),15	; E0Y: mute base tone amplitude
+				ld	(ix+O_PAT_VOL_R),15
+	KeepBaseTone:		
+				and	$F0
+				cp	$D0			; STMF 'D' = Disable envelope
+				jr	z,DisableEnv
+				
+; STMF->SAA1099 EG register encoding.
+; JS reference: val = ((cmdValue & 0x0E) << 1) | (cmdValue & 0x81); val ^= 0x82
+; E = full cmdValue byte (both nibbles matter: upper nibble bit3 = E1y keep-amplitude)
+				ld	a,e
+				and	$0E			; A = cmdValue & 0x0E
+				add	a,a			; A = (cmdValue & 0x0E) << 1
+				ld	d,a			; D = high part
+				ld	a,e
+				and	$81			; A = cmdValue & 0x81 (bit7=ENVEXT, bit0=false-stereo)
+				or	d			; A = ((cmdValue & 0x0E) << 1) | (cmdValue & 0x81)
+				xor	$82			; A ^= 0x82  -> sets ENABL(bit3) and ENVEXT correctly
+				jr	SetEnv
+				
+	DisableEnv:		
+				xor	a			; 0 = Reset envelope generator
+				
+	SetEnv:			
+				ld	e,a
+				ld	a,(VAR_CH_IDX)
+				cp	3
+				jr	nc,EnvGen1
+				
+; Channels 0, 1, 2 use EG0 ($18)
+				ld	a,e
+				ld	(VAR_EG0_SHAPE),a	; Save EG0 shape
+				ld	a,$18
+				call	WriteSAA_Reg
+				ret
+				
+	EnvGen1:		
+; Channels 3, 4, 5 use EG1 ($19)
+				ld	a,e
+				ld	(VAR_EG1_SHAPE),a	; Save EG1 shape
+				ld	a,$19
+				call	WriteSAA_Reg
+				ret
+				
+; ===========================================================================
+; CmdDelayOrn: cmd $06 - Delay Ornament by N ticks
+; Each tick: suppress ornament (handled by ProcessOrnament check), count down.
+; When counter reaches 0: reset orn ptr to base, clear command.
+; ===========================================================================
+	CmdDelayOrn:		
+				dec	(ix+O_CMD_DAT)		; Decrement delay counter
+				ret	nz			; Still counting: keep cmd active (ProcessOrnament suppressed)
+; Delay expired: reset ornament pointer to base and clear command
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; CmdDelaySample: cmd $08 - Delay Sample by N ticks
+; While active, sample and ornament processing are suppressed. When the counter
+; reaches 0, sample restarts from base and normal playback resumes.
+; ===========================================================================
+	CmdDelaySample:		
+				ld	a,(ix+O_SAMP_NUM)
+				or	a
+				jr	z,CmdDelaySampleDone
+				ld	a,(ix+O_CMD_DAT)
+				or	a
+				jr	z,CmdDelaySampleDone
+				ld	b,a
+				ld	a,(VAR_GLOBAL_SPEED)
+				cp	b
+				jr	z,CmdDelaySampleDone	; Ignore delays >= current row speed
+				jr	c,CmdDelaySampleDone
+				dec	(ix+O_CMD_DAT)
+				ret	nz
+				ld	l,(ix+O_SAMP_BASE_L)
+				ld	h,(ix+O_SAMP_BASE_H)
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ld	(ix+O_NOTE_TRIG),1
+	CmdDelaySampleDone:	
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; Uses: AF, BC, DE, HL
+; ===========================================================================
+	GlissandoInit:		
+				; Step 1: save target note, restore base note
+				ld	a,(ix+O_NOTE)		; A = target note (just set by HandleNote)
+				ld	(ix+O_GLISS_NOTE),a	; Store target note
+				ld	a,(VAR_TEMP_NOTE)	; A = old note (base, where we slide FROM)
+				ld	(ix+O_NOTE),a		; Revert O_NOTE to base note
+				or	a
+				ret	z			; Old note = 0? No active glide, abort
+				; Step 2: compute freq_word for base note
+				dec	a			; 0-based index
+				call	GetFreqWordFromNote
+				ld	c,e			; C = base freq_byte
+				ld	b,d			; B = base octave
+				; Step 3: compute freq_word for target note
+				ld	a,(ix+O_GLISS_NOTE)
+				or	a
+				ret	z			; Target = 0? Abort
+				dec	a
+				call	GetFreqWordFromNote
+				; Step 4: delta = target_word - base_word (signed 16-bit)
+				ld	h,d
+				ld	l,e			; HL = target word
+				ld	d,b
+				ld	e,c			; DE = base word
+				or	a			; Clear carry
+				sbc	hl,de			; HL = target_word - base_word (signed delta)
+				; Step 5: store delta and reset command shift
+				ld	(ix+O_GLISS_TGT_L),l
+				ld	(ix+O_GLISS_TGT_H),h
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_CMD_PHASE),0
+				ret
+				
+; ===========================================================================
+; CmdPortamento: cmd $01 (Up) / cmd $02 (Down) - Portamento
+; paramH = (cmdDat >> 4): period in ticks between each shift step
+; paramL = (cmdDat & $0F): shift magnitude per step (frequency units)
+; O_CMD_PHASE: countdown (0 = reload from paramH)
+; O_CMD_SHIFT_L/H: accumulated 16-bit signed frequency shift
+; Shift accumulates indefinitely (no stop condition).
+; ===========================================================================
+	CmdPortamento:		
+				ld	a,(ix+O_CMD_PHASE)
+				or	a
+				jp	nz,PortPhaseActive
+				ld	a,(ix+O_CMD_DAT)
+				and	$F0
+				rrca
+				rrca
+				rrca
+				rrca				; A = paramH
+				or	a
+				ret	z			; paramH = 0: infinite period, never fires
+				ld	(ix+O_CMD_PHASE),a
+	PortPhaseActive:	
+				dec	(ix+O_CMD_PHASE)
+				ret	nz			; Still counting: nothing to do
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F			; A = paramL
+				ld	b,a
+				ld	a,(ix+O_CMD)
+				cp	$01
+				jp	z,PortUp
+				ld	a,(ix+O_CMD_SHIFT_L)
+				sub	b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,PortDownDone
+				dec	(ix+O_CMD_SHIFT_H)
+	PortDownDone:		
+				ret
+	PortUp:			
+				ld	a,(ix+O_CMD_SHIFT_L)
+				add	a,b
+				ld	(ix+O_CMD_SHIFT_L),a
+				ret	nc
+				inc	(ix+O_CMD_SHIFT_H)
+				ret
+				
+; ===========================================================================
+; CmdGlissando: cmd $03 - Glissando to given note
+; paramH = (cmdDat >> 4): period in ticks between each shift step
+; paramL = (cmdDat & $0F): shift magnitude per step
+; O_GLISS_NOTE: target note (1-96, stored by GlissandoInit)
+; O_GLISS_TGT_L/H: signed 16-bit target delta (target_freq_word - base_freq_word)
+; O_CMD_SHIFT_L/H: current accumulated signed 16-bit shift
+; O_CMD_PHASE: countdown
+; When shift reaches or passes the target delta: snap to target note, clear cmd.
+; ===========================================================================
+	CmdGlissando:		
+				ld	a,(ix+O_GLISS_NOTE)
+				or	a
+				ret	z
+				ld	a,(ix+O_CMD_PHASE)
+				or	a
+				jp	nz,GlissPhaseActive
+				ld	a,(ix+O_CMD_DAT)
+				and	$F0
+				rrca
+				rrca
+				rrca
+				rrca				; A = paramH
+				or	a
+				ret	z			; paramH = 0: never fires
+				ld	(ix+O_CMD_PHASE),a
+	GlissPhaseActive:	
+				dec	(ix+O_CMD_PHASE)
+				ret	nz
+				ld	a,(ix+O_GLISS_TGT_H)
+				bit	7,a
+				jp	nz,GlissDown
+	GlissUp:		
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F
+				ld	b,a
+				ld	a,(ix+O_CMD_SHIFT_L)
+				add	a,b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,GlissUpCheckSnap
+				inc	(ix+O_CMD_SHIFT_H)
+	GlissUpCheckSnap:	
+				ld	l,(ix+O_CMD_SHIFT_L)
+				ld	h,(ix+O_CMD_SHIFT_H)
+				ld	e,(ix+O_GLISS_TGT_L)
+				ld	d,(ix+O_GLISS_TGT_H)
+				or	a
+				sbc	hl,de
+				ret	c			; shift < target, keep sliding
+				jp	GlissSnap
+	GlissDown:		
+				ld	a,(ix+O_CMD_DAT)
+				and	$0F
+				ld	b,a
+				ld	a,(ix+O_CMD_SHIFT_L)
+				sub	b
+				ld	(ix+O_CMD_SHIFT_L),a
+				jp	nc,GlissDownCheckSnap
+				dec	(ix+O_CMD_SHIFT_H)
+	GlissDownCheckSnap:	
+				ld	l,(ix+O_CMD_SHIFT_L)
+				ld	h,(ix+O_CMD_SHIFT_H)
+				ld	e,(ix+O_GLISS_TGT_L)
+				ld	d,(ix+O_GLISS_TGT_H)
+				or	a
+				sbc	hl,de
+				jp	z,GlissSnap
+				jp	pe,GlissDownOvf
+				jp	m,GlissSnap
+				ret
+	GlissDownOvf:		
+				jp	p,GlissSnap
+				ret
+	GlissSnap:		
+				ld	a,(ix+O_GLISS_NOTE)
+				ld	(ix+O_NOTE),a
+				ld	(ix+O_CMD_SHIFT_L),0
+				ld	(ix+O_CMD_SHIFT_H),0
+				ld	(ix+O_GLISS_NOTE),0
+				ld	(ix+O_GLISS_TGT_L),0
+				ld	(ix+O_GLISS_TGT_H),0
+				ld	(ix+O_CMD),0
+				ret
+				
+; ===========================================================================
+; CmdOrnOffset: cmd $07 - Set Ornament cursor to given position (one-shot)
+; ===========================================================================
+	CmdOrnOffset:		
+				ld	a,(ix+O_CMD_DAT)
+				or	a
+				jr	z,CmdOrnOffDone		; cmd_dat=0: no jump (JS: cmdValue must be > 0)
+				ld	l,(ix+O_ORN_BASE_L)
+				ld	h,(ix+O_ORN_BASE_H)
+				ld	e,a
+				ld	d,0
+				add	hl,de			; HL = orn_base + cmd_dat (new cursor position)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+	CmdOrnOffDone:		
+				ld	(ix+O_CMD),0		; One-shot: clear command
+				ret
+				
+; ===========================================================================
+; Volume Mixer
+; D = pattern volume (0-15), E = sample volume (0-15)
+; FADE_ATT_PATCH+1 is self-modified by fadeout routine in SCENE_15_PH_C
+; Output: A = clamp(clamp(E - FadeAtt) - D, 0)
+; ===========================================================================
+	MixVolume:		
+				ld	a,e			; A = sample volume
+	FADE_ATT_PATCH:		sub	$00			; self-mod: fadeout attenuation (opcode: D6 xx)
+				jp	c,MixVolume_clamp	; if E < FadeAtt, clamp to 0
+				sub	d			; subtract pattern attenuation
+				ret	nc			; return if still >= 0
+	MixVolume_clamp:	xor	a			; clamp to 0
+				ret
+				
+; ===========================================================================
+; ProcessSample
+; ===========================================================================
+	ProcessSample:		
+				ld	a,(ix+O_SAMP_NUM)
+				or	a
+				ret	z
+				ld	a,(ix+O_CMD)
+				cp	$08
+				jr	nz,CheckSamplePtr
+				xor	a			; Delay sample keeps channel silent until trigger time
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+	CheckSamplePtr:		
+				
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				ld	a,h
+				or	l
+				jr	nz,ReadSample		; Non-zero pointer: read sample data
+				
+				xor	a			; Empty pointer: silence channel
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+				
+	ReadSample:		
+; Read Byte 1
+				ld	a,(hl)
+				inc	hl
+				
+; Check control byte
+				bit	7,a
+				jp	nz,ProcessControlByte
+				
+				ld	b,a
+				
+; Mix Left Volume
+				and	$0F
+				ld	e,a
+				ld	d,(ix+O_PAT_VOL_L)
+				call	MixVolume
+				ld	(ix+O_VOL_L),a
+				
+; Initialize flags to 0
+				ld	a,0
+				
+; Check if noise is enabled (STMF: 1 = Enabled)
+				bit	6,b
+				jr	z,SkipNoiseFlag		; If 0, skip enabling
+				set	1,a			; If 1, set Noise flag
+	SkipNoiseFlag:		
+				ld	(ix+O_FLAGS),a
+				
+; Skip noise freq update if disabled
+				bit	1,a
+				jr	z,ReadByte2
+				
+; Update Noise Frequency
+				ld	a,b
+				and	$30
+				rrca
+				rrca
+				rrca
+				rrca
+				ld	e,a
+				
+				ld	a,(VAR_CH_IDX)
+				cp	3
+				jr	nc,HandleGen2
+				
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				and	$FC
+				or	e
+				ld	(VAR_SAA_NOISE_FREQ),a
+				jr	ReadByte2
+				
+	HandleGen2:		
+				ld	a,e
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a
+				ld	e,a
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				and	$CF
+				or	e
+				ld	(VAR_SAA_NOISE_FREQ),a
+				
+	ReadByte2:		
+; Read Byte 2
+				ld	a,(hl)
+				inc	hl
+				ld	b,a
+				
+; Mix Right Volume
+				and	$0F
+				ld	e,a
+				ld	d,(ix+O_PAT_VOL_R)
+				call	MixVolume
+				ld	(ix+O_VOL_R),a
+				
+; Check if tone is enabled (STMF: 1 = Enabled)
+				bit	7,b
+				jr	z,SkipToneFlag		; If 0, skip enabling
+				ld	a,(ix+O_FLAGS)
+				or	1			; Set Tone flag safely via register ops
+				ld	(ix+O_FLAGS),a
+	SkipToneFlag:		
+				
+; Calculate Octave Offset
+				ld	a,b
+				and	$70
+				rrca
+				rrca
+				rrca
+				rrca
+				bit	2,a
+				jr	z,PositiveOctave
+				or	$F8
+	PositiveOctave:		
+				ld	(ix+O_FREQ_OFFSET_H),a
+				
+; Read Byte 3 (Frequency Fine-tune)
+				ld	a,(hl)
+				inc	hl
+				ld	(ix+O_FREQ_OFFSET_L),a
+				
+; CRITICAL: Update pointer after inner loop!
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				ret
+				
+	ProcessControlByte:	
+				cp	$80
+				jr	z,SavePointer
+; Check if in release phase: released sample skips loop-back, continues into release section
+; NOTE: Must use ld b,a / ld a,b (NOT push/pop af) to preserve the Z flag from 'or a'.
+; pop af would restore old flags from cp $80, making jp nz always branch (loop-back dead code).
+				ld	b,a			; Save ctrl byte (ld does not affect flags)
+				ld	a,(ix+O_RELEASED)
+				or	a			; Z=0 if released, Z=1 if not released
+				ld	a,b			; Restore ctrl byte (ld does not affect Z flag)
+				jp	nz,ReadSample		; Released: continue forward past loop ctrl byte
+; Control Loop (normal: not in release)
+				and	$7F
+				ld	e,a
+				ld	a,128
+				sub	e			; A = 128 - N
+				ld	l,a
+				ld	h,0			; HL = 128 - N
+				ld	e,l
+				ld	d,h			; DE = 128 - N
+				add	hl,hl			; HL = (128 - N) * 2
+				add	hl,de			; HL = (128 - N) * 3
+				ld	e,l
+				ld	d,h			; DE = jump back offset
+				
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				sub	a			; Clear carry (A=0, C=0)
+				sbc	hl,de			; HL = new position
+; Save new position
+				ld	(ix+O_SAMP_PTR_L),l
+				ld	(ix+O_SAMP_PTR_H),h
+				jp	ReadSample
+				
+	SavePointer:		
+; End-of-sample ($80): stop sample playback.
+; JS player marks the channel as no longer playing once the sample reaches its
+; end, so keeping the pointer on $80 would incorrectly sustain the last frame.
+				xor	a
+				ld	(ix+O_SAMP_PTR_L),a
+				ld	(ix+O_SAMP_PTR_H),a
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ret
+				
+; ===========================================================================
+; UpdateSAA_Registers
+; ===========================================================================
+	UpdateSAA_Registers:	
+				xor	a
+				ld	(VAR_SAA_OCTAVES),a
+				ld	(VAR_SAA_OCTAVES+1),a
+				ld	(VAR_SAA_OCTAVES+2),a
+				ld	(VAR_SAA_FREQ_EN),a
+				ld	(VAR_SAA_NOISE_EN),a
+				
+				ld	ix,CH_DATA
+				ld	de,5 * CH_STRUCT_SIZE
+				add	ix,de
+				ld	b,6
+				ld	c,5
+				
+	RegLoop:		
+				push	bc
+				ld	a,c
+				ld	(VAR_CH_IDX),a
+				ld	l,(ix+O_SAMP_PTR_L)
+				ld	h,(ix+O_SAMP_PTR_H)
+				ld	a,h
+				or	l
+				jp	z,SilentChannel
+				
+				ld	a,(ix+O_NOTE)
+				or	a
+				jr	z,HandleDecay
+				
+    ; --- NEW NOTE TRIGGER ---
+				dec	a
+				ld	l,a
+				ld	h,0
+				
+				ld	a,(ix+O_POS_TRANSPOSE)
+				ld	e,a			; E = low byte
+				add	a,a
+				sbc	a,a
+				ld	d,a			; D = sign extension
+				add	hl,de
+				
+				ld	a,l
+				ld	(ix+O_ACT_NOTE),a	; SAVE BASE NOTE (Note + Transpose ONLY)
+				jr	ApplyOrnament
+				
+	HandleDecay:		
+				ld	a,(ix+O_ACT_NOTE)	; Load base note
+				ld	l,a
+				ld	h,0
+				
+	ApplyOrnament:		
+    ; --- ADD ORNAMENT DYNAMICALLY EVERY TICK ---
+				ld	a,(ix+O_ORN_OFFSET)
+				ld	e,a			; E = low byte
+				add	a,a
+				sbc	a,a
+				ld	d,a			; D = sign extension
+				add	hl,de
+				
+    ; Clamp 0 to 95
+				bit	7,h
+				jr	z,NoteNotNeg
+				ld	hl,0
+				jr	NoteClamp
+	NoteNotNeg:		
+				ld	a,h
+				or	a
+				jr	nz,NoteOver
+				ld	a,l
+				cp	96
+				jr	c,NoteClamp
+	NoteOver:		
+				ld	hl,95
+	NoteClamp:		
+				ld	e,l			; E = Final note for table lookup
+				
+	GetFreq:		
+				ld	a,e
+				call	GetFreqWordFromNote
+				
+; --- Channel Bit Mask (CRITICAL FOR SOUND) ---
+				ld	a,c
+				ld	h,1
+				or	a
+				jr	z,MaskDone
+	MaskLoop:		
+				sla	h
+				dec	a
+				jr	nz,MaskLoop
+	MaskDone:		
+				ld	a,(ix+O_FLAGS)
+				bit	0,a
+				jr	z,NoToneBit
+				
+				ld	a,(VAR_SAA_FREQ_EN)
+				or	h
+				ld	(VAR_SAA_FREQ_EN),a
+				
+	NoToneBit:		
+				ld	a,(ix+O_FLAGS)
+				bit	1,a
+				jr	z,NoNoiseBit
+				
+				ld	a,(VAR_SAA_NOISE_EN)
+				or	h
+				ld	(VAR_SAA_NOISE_EN),a
+				
+	NoNoiseBit:		
+				
+; --- ENVELOPE RETRIGGER ---
+				ld	a,(ix+O_CMD)
+				cp	$08
+				jr	z,EnvRetrigDone		; Delay sample keeps trigger pending until start
+				ld	a,(ix+O_NOTE_TRIG)
+				or	a
+				jr	z,EnvRetrigDone
+				ld	(ix+O_NOTE_TRIG),0	; Clear trigger flag
+				
+				ld	a,c
+				cp	3
+				jr	nc,RetrigEG1
+				
+				ld	a,(VAR_EG0_SHAPE)
+				or	a
+				jr	z,EnvRetrigDone		; Do not trigger if EG is disabled
+				ld	l,e			; Preserve frequency and octave across EG write
+				ld	e,a
+				ld	a,$18
+				call	WriteSAA_Reg
+				ld	e,l			; Restore frequency and octave
+				jr	EnvRetrigDone
+				
+	RetrigEG1:		
+				ld	a,(VAR_EG1_SHAPE)
+				or	a
+				jr	z,EnvRetrigDone		; Do not trigger if EG is disabled
+				ld	l,e			; Preserve frequency and octave across EG write
+				ld	e,a
+				ld	a,$19
+				call	WriteSAA_Reg
+				ld	e,l			; Restore frequency and octave
+				
+	EnvRetrigDone:		
+				
+	; --- Apply 11-bit combined pitch shift ---
+				ld	a,e			; A = Base frequency
+				add	a,(ix+O_FREQ_OFFSET_L)	; Add low byte shift
+				ld	e,a			; E = New frequency
+				
+				ld	a,d			; A = Base octave
+				adc	a,(ix+O_FREQ_OFFSET_H)	; Add high byte shift (sign extended) + carry
+				ld	d,a
+				ld	a,e
+				add	a,(ix+O_CMD_SHIFT_L)
+				ld	e,a
+				ld	a,d
+				adc	a,(ix+O_CMD_SHIFT_H)
+				and	$07			; Wrap octave to 0-7
+				
+	OctOk:			
+				ld	d,a			; D = final valid octave
+				
+	SilentWrite:		
+	FreqDone:		
+; --- Write Frequency ($08-$0D for channels 0-5) ---
+				ld	a,c
+				add	a,8
+				call	WriteSAA_Reg
+				
+; --- Write Volume ($00-$05 for channels 0-5) ---
+; Stereo: pack right vol into upper nibble, left vol into lower nibble (RRRRLLLL)
+				ld	a,(ix+O_VOL_R)
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a			; A = VolR << 4
+				or	(ix+O_VOL_L)		; A = (VolR << 4) | VolL
+				ld	e,a
+				
+				ld	a,c			; A = channel index
+				call	WriteSAA_Reg
+				
+; --- Save Octave to VAR_SAA_OCTAVES ---
+				push	hl
+				ld	a,c
+				srl	a
+				ld	hl,VAR_SAA_OCTAVES
+				add	a,l
+				ld	l,a
+				jr	nc,NoCarryOct
+				inc	h
+	NoCarryOct:		
+				ld	a,c
+				and	1
+				jr	nz,UpperNibble
+				ld	a,(hl)
+				and	$F0
+				or	d
+				ld	(hl),a
+				jr	OctSaveDone
+				
+	SilentChannel:		
+				xor	a
+				ld	(ix+O_VOL_L),a
+				ld	(ix+O_VOL_R),a
+				ld	(ix+O_FLAGS),a
+				ld	e,a
+				ld	d,a
+				jp	SilentWrite
+				
+; ===========================================================================
+; Input: A = zero-based note index (0-95)
+; Output: E = frequency byte, D = octave
+; Uses: AF, B, DE, HL
+; Looks up the 12-note low-byte table and derives octave in code.
+; B wraps into the next octave, B-8 is clamped to the highest valid value.
+; ===========================================================================
+	GetFreqWordFromNote:	
+				ld	b,0			; B = octave base
+	FreqOctaveLoop:		
+				cp	12
+				jp	c,FreqClassReady
+				sub	12
+				inc	b
+				jp	FreqOctaveLoop
+	FreqClassReady:		
+				ld	e,a
+				ld	d,0
+				ld	hl,FREQ_TABLE
+				add	hl,de
+				ld	e,(hl)			; E = class frequency byte
+				ld	d,b			; D = octave base
+				ld	a,e
+				cp	$05			; B note wraps into next octave
+				ret	nz
+				inc	d
+				ld	a,d
+				cp	8
+				ret	c
+				ld	e,$F3			; Clamp B-8 to the highest valid table value
+				ld	d,7
+				ret
+	UpperNibble:		
+				ld	a,d
+				add	a,a
+				add	a,a
+				add	a,a
+				add	a,a
+				ld	b,a
+				ld	a,(hl)
+				and	$0F
+				or	b
+				ld	(hl),a
+	OctSaveDone:		
+				pop	hl
+				
+	NextCh:			
+				ld	de,$FFDB		; -CH_STRUCT_SIZE
+				add	ix,de
+				pop	bc
+				dec	c
+				dec	b
+				jp	nz,RegLoop
+				
+; --- Global Flush: write octave, freq-enable, noise-enable, noise-freq ---
+				ld	hl,VAR_SAA_OCTAVES
+				ld	a,$10
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				inc	hl
+				ld	a,$11
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				inc	hl
+				ld	a,$12
+				ld	e,(hl)
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_FREQ_EN)
+				ld	e,a
+				ld	a,$14
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_NOISE_EN)
+				ld	e,a
+				ld	a,$15
+				call	WriteSAA_Reg
+				
+				ld	a,(VAR_SAA_NOISE_FREQ)
+				ld	e,a
+				ld	a,$16
+				call	WriteSAA_Reg
+				ret
+				
+; ===========================================================================
+; ProcessOrnament
+; ===========================================================================
+	ProcessOrnament:	
+				ld	a,(ix+O_ORN_NUM)
+				or	a
+				jr	z,NoOrn
+				
+; --- Cmd $06/$08: suppress ornament output during countdown ---
+				ld	a,(ix+O_CMD)
+				cp	$06
+				jr	z,NoOrn
+				cp	$08
+				jr	z,NoOrn
+				
+				ld	l,(ix+O_ORN_PTR_L)
+				ld	h,(ix+O_ORN_PTR_H)
+				
+; Check for zero (unresolved or empty) ornament pointer
+				ld	a,h
+				or	l
+				jr	z,NoOrn
+				
+	ReadOrn:		
+				ld	a,(hl)
+				inc	hl
+				
+				bit	7,a			; bit7=1 means ornament controller
+				jr	nz,HandleOrnCtrl
+				
+				bit	6,a			; 7-bit signed to 8-bit signed extension
+				jr	z,SaveOrnData
+				or	$80
+	SaveOrnData:		
+				ld	(ix+O_ORN_OFFSET),a
+				
+	SaveOrnPtr:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ret
+				
+	HandleOrnCtrl:		
+				and	$7F
+				jr	z,OrnEnd		; $80 = end of ornament
+				
+; Loop controller: back = (128 - ctrlValue)
+; Note: HL is reloaded from O_ORN_PTR (points to ctrl byte), so no +1 needed
+				ld	e,a
+				ld	a,128
+				sub	e
+				ld	e,a
+				ld	d,0
+				
+				ld	l,(ix+O_ORN_PTR_L)
+				ld	h,(ix+O_ORN_PTR_H)
+				sub	a			; Clear carry (A=0, C=0)
+				sbc	hl,de
+				
+	SaveOrnLoopPtr:		
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				jr	ReadOrn
+				
+	OrnEnd:			
+				dec	hl			; Keep pointer on end controller ($80)
+				ld	(ix+O_ORN_PTR_L),l
+				ld	(ix+O_ORN_PTR_H),h
+				ret
+				
+	NoOrn:			
+				ld	(ix+O_ORN_OFFSET),0
+				ret
+				
+; ===========================================================================
+; WriteSAA_Reg: A = register, E = data
+; ===========================================================================
+	WriteSAA_Reg:		
+				out	(SAA_ADDR_PORT),a
+				ld	a,e
+				out	(SAA_DATA_PORT),a
+				ret
+				
+; ===========================================================================
+; ResetSAA
+; ===========================================================================
+	ResetSAA:		
+				ld	a,$1C
+				out	(SAA_ADDR_PORT),a
+				ld	a,$02
+				out	(SAA_DATA_PORT),a
+				
+				ld	d,0
+	ClearSAA:		
+				ld	a,d
+				out	(SAA_ADDR_PORT),a
+				xor	a
+				out	(SAA_DATA_PORT),a
+				inc	d
+				ld	a,d
+				cp	32
+				jr	nz,ClearSAA
+				
+				ld	a,$1C
+				out	(SAA_ADDR_PORT),a
+				ld	a,$01
+				out	(SAA_DATA_PORT),a
+				ret
+				
+; ===========================================================================
+; Frequency Table Low Bytes (C-x to B-x)
+; Octave is derived in code, B advances to the next octave.
+; ===========================================================================
+	FREQ_TABLE:		
+				db	$21, $3C, $55, $6D, $84, $99, $AD, $C0, $D2, $E3, $F3, $05; C-x to B-x
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di    ; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS1		; no more bits left?
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jr	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2EV		; no more bits left?
+				jr	NC,LENSIZELOOPEV
+				jr	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2OD		; no more bits left?
+				jr	NC,LENSIZELOOPOD
+				jr	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jr	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS5		; no more bits left?
+				ccf
+				jr	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jr	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jr	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPEV
+				jr	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPOD
+				jr	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDOD
+				jr	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jr	C,OFFSETENDOD
+				jr	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jr	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jr	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jr	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jr	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jr	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jr	OFFSETINCEV
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; CRTC routines
+;--------------------------------------------------------------------------------------------------------------------------------------   								
+	CRTC_ENABLE		ld	A,1			; CRTC enable screen
+				out	(112),A
+				ld	A,64
+				out	(113),A
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; ASSETS
+;--------------------------------------------------------------------------------------------------------------------------------------   
+	TEXT_1:			db	19, "           SAA 1099"
+	TEXT_0:			db	22, "         STMF PLAYING:"
+	TEXT00:			db	27, "     (C) 2026 by Fast&Force"
+				
+	TEXT01:			db	"            Lyra-III           É"
+	TEXT02:			db	"Á   Orava-II-Chipmunks-d.r.    É"
+	TEXT03:			db	"Á   Beat-to-the-pulp-RetroKo   É"
+	TEXT04:			db	"Á   Arcane-Zone-Part-2-ZX-AA   É"
+	TEXT05:			db	"Á     Celebrate-Demo-music     É"
+	TEXT06:			db	"Á       High-Color-2018         "
+				
+	GREETING_TEXT1		db	"Vass Sándor  Multichip Soundcard",0
+	GREETING_TEXT2		db	"  Grósz Attila WinTVC emulator",0
+	GREETING_TEXT3		db	"    Kiss Károly Image to TVC",0
+	GREETING_TEXT4		db	"Geco, Doberdo Brothers, BerySoft",0
+	GREETING_TEXT5		db	" AnyStone, Murphy, Orosz Olivér",0
+				
+	GREETING_PTRS		dw	GREETING_TEXT1
+				dw	GREETING_TEXT2
+				dw	GREETING_TEXT3
+				dw	GREETING_TEXT4
+				dw	GREETING_TEXT5
+				
+				
+	PIC_MAIN_ZX7:		incbin	"pic-main.zx7"
+	PIC_GREETINGS_ZX7:	incbin	"greetings_4c.bin.zx7"
+				
+;******************************************************************
+; Draw characters
+; precondition: VID page is at $8000 
+;******************************************************************
+	SCREEN_WIDTH		equ	64			; képernyő szélessége bájtokban			
+	END_OF_TEXT		equ	255			; ez a kód jelzi a szöveg végét
+	CHAR_SET_IMAGE_WIDTH	equ	192			; karakterkészlet image szélessége bájtokban
+	CHAR_SET_IMAGE_HEIGHT	equ	10			; karakterkészlet image magassága pixelekben			
+				
+	CHAR_HEIGHT		db	0
+	VRAM_POSITION		dw	$8000
+				
+	INIT_CHARSET		
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,CHAR_SET_SRC		; SOURCE: U2
+				ld	de,CHAR_SET		; DESTINATION: U3
+				call	ZX7_DECOMPRESS
+				ret
+				
+				
+	RST30DB3		dec	b			; can be called replacing rst $30 with db $3
+				sla	b			; x2 for 4 color mode
+				dec	c			; see TVC ROM manual page 176
+				ld	a,c
+				add	a,a
+				add	a,a
+				add	a,c
+				add	a,a
+				ld	h,a
+				xor	a
+				srl	h
+				rra
+				scf
+				rr	h
+				rra
+				or	b
+				ld	l,a			; HL = $8000 + (sor * 10) * 64 + oszlop
+				ld	(VRAM_POSITION),hl
+				ret
+				
+	RST30DB2		ld	(WRITE_TEXT+1),de	; can be called replacing rst $30 with db $2
+				ld	de,(VRAM_POSITION)
+				
+				;{ ---------- WRITE_TEXT
+				; from TVC lemezújság tech demo - (c) Bertók Zsolt, BerySoft - 2023
+                              	; szöveg kiírása saját karakterkészlettel
+                              	; paraméterek: 	DE -> képernyő (VRAM) pozíció; 
+				; 		(WRITE_TEXT+1) <- a szöveg címe
+				; hasznája AF, BC, DE, HL
+	WRITE_TEXT		ld	A,(0)			; A = a szöveg karaktere
+				or	A			; A == 0?
+				ret	z			; Ha A = 0, akkor ez a sor vége, visszatérünk a hívóhoz
+				cp	END_OF_TEXT		; A = END_OF_TEXT?
+				ret	z			; Ha A = END_OF_TEXT, akkor ez a szöveg vége, visszatérünk a hívóhoz
+				ld	HL,CHAR_SET		; HL -> CHAR_SET image
+				;{ karakter típusának elemzése
+				cp	32			; a karakter alacsonyabb kódú, mint a szóköz?
+				jp	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki
+				cp	58			; kisebb, mint a 9 utáni karakter?
+				jr	c,WRITE_TEXT_SPACE_TO_9	; ha igen, akkor szóköztől és 9 közötti karakter
+				cp	"["			; Z vagy kisebb karakter
+				jr	c,WRITE_TEXT_A_Z	; ha igen, akkor kiírjuk
+				cp	123			; kisebb, mint a "z" utáni karakter?
+				jr	c,WRITE_TEXT_SMALL_A_Z	; ha igen, akkor kiírjuk
+				cp	144			; 144 az "á" betű kódja
+				jr	nc,WT_SMALL_ACCENTED_A_Z; ha A >= 144, akkor ugrás a kis ékezetes betűk kiírására
+				;}
+                              	;{ nagy ékezetes karakterek - Á,É,Í,Ó,Ö,Ő,Ú,Ü,Ű				
+				cp	137			; 137 az "Ű" betű utáni karakter kódja
+				jr	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 137, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26)*2	; a SPACE-"/","0"-"9","A"-"Z","a"-"z" karaktereket átlépjük
+				add	HL,BC			; HL az "Á" betű képdarabjára mutat			
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (nagy ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	128			; a kiírandó karakter kódjából kivonjuk az "Á" betű kódját
+				jr	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "Á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jr	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben     
+				;}
+				;{ kis ékezetes karakterek - á,é,í,ó,ö,ő,ú,ü,ű
+	WT_SMALL_ACCENTED_A_Z	cp	153			; 153 az "ű" betű utáni karakter kódja
+				jp	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 153, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26+9)*2	; a SPACE-'/","0"-"9","A"-"Z","a"-"z","Á"-"Ű" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (kis ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	144			; a kiírandó karakter kódjából kivonjuk az "á" betű kódját
+				jr	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jr	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben
+				;}
+				;{ SPACE-"/" + "0"-"9"
+	WRITE_TEXT_SPACE_TO_9	push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (szóköztől a nagy "9"-ig az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	32			; a kiírandó karakter kódjából kivonjuk a szóköz kódját
+				jr	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására
+				jr	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}				
+				;{ A-Z-ig karakterek
+	WRITE_TEXT_A_Z		cp	"A"			; "A" betűnél kisebb kód?
+				jr	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10)*2		; a SPACE-'/","0"-"9" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"A"			; a kiírandó karakter kódjából kivonjuk az "A" betű kódját
+				jr	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "A" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jr	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}
+				;{ kis a-z karakterek
+	WRITE_TEXT_SMALL_A_Z	ld	BC,(16+10+26)*2		; a SPACE-"/","0"-"9","A"-"Z" karaktereket átlépjük
+				add	HL,BC			; HL -> "a"
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT	; ennyi pixel magas egy karakter (p, q, y teljesen leér a 10. sorig)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"a"			; a kiírandó karakter kódjából kivonjuk az "a" kódját
+				jr	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására				
+				;}
+				;{ a karakter kezdőcímének kiszámolása a karakterkészlet image-ben
+	WT_SET_CHAR_ADDR	add	A,A			; A = A * 2 -> 1 karakter 2 byte
+				ld	C,A
+				ld	B,0			; BC = A * 2
+				add	HL,BC			; HL a karakter első sorának első byte-jára mutat a karakterkészlet image-ben
+				;}
+                              	;{ egy karakter kiírása (DE: képernyő (VRAM) pozíció; HL: karakter image cím; C: karakter magasság pixelben)
+	WRITE_TEXT_CHAR		push	DE			; karakter képernyő (VIDEORAM) pozíciójának elrakása a STACK-re                              
+				ld	A,(CHAR_HEIGHT)		; ennyi pixel magas egy karakter
+	WRITE_TEXT_CHAR_LOOP	ld	BC,CHAR_SET_IMAGE_WIDTH	; ennyi byte széles a karakterkészletett tartalmazó image
+				ldi
+				ldi
+				add	HL,BC			; HL -> következő sor a karakterkészletben
+				ex	DE,HL
+				ld	BC,SCREEN_WIDTH-2	; következő sorig ennyit kell lépni a képernyőn (a -2 a kirakott karakter egy sora)
+				add	HL,BC
+				res	6,H			; Ha a 6. bit 1, akkor 48K fölé ért a címzés, ezért azt töröljük, így mindig 32K-48K között lesz HL értéke
+				;set	7,H			; Beállítjuk a 7. bitet, hogy HL értéke ne kerülhessen 32K alá a csökkentés következtében, így nem megy a VIDEORAM alá a címzés
+				ex	DE,HL			; DE: a következő sorra mutat a képernyőn
+				dec	A			; kirakandó sorok csökkentése
+				jr	NZ,WRITE_TEXT_CHAR_LOOP	; ha nem nulla, akkor ugrás a folytatásra                              
+				pop	DE			; a most kirakott karakter képernyő (VRAM) pozíciójának előszedése a STACK-ről
+				;}
+                              	;{ a szöveg következő karakterére lépés
+	WRITE_TEXT_NEXT_CHAR	inc	DE			; egy karakternyi (2 byte)
+				inc	DE			; hely átlépése a képernyőn
+	WRITE_TEXT_SKIP_CHAR	ld	hl,(WRITE_TEXT+1)	; 16-bit text pointer advance (handles page boundary)
+				inc	hl
+				ld	(WRITE_TEXT+1),hl
+				jp	WRITE_TEXT		; ugrás a kiírás elejére
+				;}
+				ret
+                              	;} end of WRITE_TEXT
+				
+;-------------------------------------------------------------------------				
+				org	$6000
+	TEX4K			ds	8192
+				
+	TEXTURE_ZX7:		incbin	"texture8k.bin.zx7"
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; SET CHARACTER
+;--------------------------------------------------------------------------------------------------------------------------------------   
+	SET_CHARACTER:		call	INIT_CHARSET
+				call	INIT_TEXTURE
+				ld	hl,CHARDEF1
+				ld	de,$0740
+				ld	bc,20			; 2x10 = two characters (Á and É) are redefined
+				ldir
+				ret
+	CHARDEF1:		db	8,24,56,127,255,255,127,56,24,8
+	CHARDEF2:		db	16,24,28,254,255,255,254,28,24,16
+				
+	CRTC_DISABLE		ld	A,1			; CRTC disable screen
+				out	(112),A
+				ld	A,0
+				out	(113),A
+				ret
+;-------------------------------------------------------------------------				
+	INIT_TEXTURE:		
+				ld	HL,TEXTURE_ZX7		; HL-be a tömörített kezdőképernyő memóriacíme                                                                
+				ld	DE,TEX4K		; DE-be a célmemória címe
+				call	ZX7_DECOMPRESS		; Kép kitömörítése
+				ret
+;-------------------------------------------------------------------------				
+				
+	CHAR_SET		equ	$F0FF
+				
+	; CHAR_SET - 768x10 pixels; 384x10 byte; 96 karakter x 10 sor; 1 karakter: 2 byte x 10 pixel
+	CHAR_SET_SRC		incbin	"charset.bin.zx7"
+				
+;-------------------------------------------------------------------------				
+	MUSIC_BY_TEXT		equ	$0100
+	MUSIC_BY_ZX7		incbin	"musicby.txt.zx7"
+	INIT_MUSICBY:		
+				ld	HL,MUSIC_BY_ZX7		; HL-be a tömörített kezdőképernyő memóriacíme                                                                
+				ld	DE,MUSIC_BY_TEXT	; DE-be a célmemória címe
+				call	ZX7_DECOMPRESS		; kitömörítés
+				ret
+;-------------------------------------------------------------------------
+				
+	FEATURES_TEXT		equ	$0100
+	FEATURES_ZX7		incbin	"features_with0.bin.zx7"
+	INIT_FEATURES:		
+				ld	HL,FEATURES_ZX7		; HL-be a tömörített kezdőképernyő memóriacíme                                                                
+				ld	DE,FEATURES_TEXT	; DE-be a célmemória címe
+				call	ZX7_DECOMPRESS		; kitömörítés
+				ret
+				
+;-------------------------------------------------------------------------							
+	NUM_OF_MUSIC		equ	6
+;--------------------------------------------------------------------------
+				
+	MUSIC_01_ZX7:		incbin	"Lyra III.bin.zx7"
+	MUSIC_02_ZX7:		incbin	"Orava II Chipmunks deadly revenge.bin.zx7"
+	MUSIC_03_ZX7:		incbin	"Beat-to-the-pulp-RetroKomp-Load-Error-2015-1-.bin.zx7"
+	MUSIC_04_ZX7:		incbin	"Arcane-Zone-Part-2-ZX-AAA-Demo-Compo-2013-2-.bin.zx7"
+	MUSIC_05_ZX7:		incbin	"Celebrate-Demo-music.bin.zx7"
+	MUSIC_06_ZX7:		incbin	"High-Color-2018.bin.zx7"
+				
+;--------------------------------------------------------------------------				
+	PIC_TVC40_ZX7		incbin	"pic_tvc40_faf.bin.zx7"
+				
+				nop
+				
+				

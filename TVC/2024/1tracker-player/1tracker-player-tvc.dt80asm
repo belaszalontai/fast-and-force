@@ -1,0 +1,1315 @@
+				
+				org	6639			; TVC programok kezdőcíme
+                                ;{BASIC Header
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+	;(c) 2024 by Fast&Force (Béla Szalontai)
+				
+	begin			di
+				xor	a
+				out	(4),a
+				out	(5),a
+				ld	hl,music_data
+				call	play
+				ei
+				ret
+				
+				
+				
+;engine code				
+;squat by Shiru, 06'17
+;Squeeker like, just without the output value table
+;4 channels of tone with different duty cycle
+;sample drums, non-interrupting
+;customizeable noise percussion, interrupting
+				
+				
+;music data is all 16-bit words, first control then a few optional ones
+				
+;control word is PSSSSSSS DDDN4321, where P=percussion,S=speed, D=drum, N=noise mode, 4321=channels
+;D triggers non-interruping sample drum
+;P trigger
+;if 1, channel 1 freq follows
+;if 2, channel 2 freq follows
+;if 3, channel 3 freq follows
+;if 4, channel 4 freq follows
+;if N, channel 4 mode follows, it is either $0000 (normal) or $04cb (noise)
+;if P, percussion follows, LSB=volume, MSB=pitch
+				
+				
+;------------------------------------	
+; ported to TVC by Fast&Force @2024
+;------------------------------------	
+						
+	RLC_H			equ	$04cb			;to enable noise mode
+	NOP_2			equ	$0000			;to disable noise mode
+	RLC_HL			equ	$06cb			;to enable sample reading
+	ADD_IX_IX		equ	$29dd			;to disable sample reading
+				
+				
+	play			
+				
+				di
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				inc	hl
+				ld	(pattern_ptr+1),de
+				
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				
+				ld	(loop_ptr+1),de
+				
+				dec	hl
+				ld	(sample_list+1),hl
+				
+				ld	hl,ADD_IX_IX
+				ld	(sample_read),hl
+				ld	hl,NOP_2		;normal mode
+				ld	(noise_mode),hl
+				
+				ld	ix,0			;needs to be 0 to skip sample reading
+				
+				ld	c,0
+				exx
+				ld	de,$0808		;sample bit counter and reload value
+				
+	play_loop		
+				
+	pattern_ptr						;=$+1		
+				ld	sp,0
+				
+	return_loop		
+				
+				pop	bc			;control word
+								;B=duration of the row (0=loop)
+								;C=flags DDDN4321 (Drum, Noise, 1-4 channel update)
+				ld	a,b
+				or	a
+				jp	nz,no_loop
+				
+	loop_ptr						;=$+1		
+				ld	sp,0
+				
+				jp	return_loop
+				
+	no_loop			
+				
+				ld	a,c
+				
+				rra
+				jr	nc,skip_note_0
+				
+				pop	hl
+				ld	(ch0_add),hl
+				
+	skip_note_0		
+				
+				rra
+				jr	nc,skip_note_1
+				
+				pop	hl
+				ld	(ch1_add),hl
+				
+	skip_note_1		
+				
+				rra
+				jr	nc,skip_note_2
+				
+				pop	hl
+				ld	(ch2_add),hl
+				
+	skip_note_2		
+				
+				rra
+				jr	nc,skip_note_3
+				
+				pop	hl
+				ld	(ch3_add),hl
+				
+	skip_note_3		
+				
+				rra
+				jr	nc,skip_mode_change
+				
+				pop	hl			;nop:nop or rlc h
+				ld	(noise_mode),hl
+				
+	skip_mode_change	
+				
+				and	7
+				jp	z,skip_drum
+				
+	sample_list		
+				ld	hl,0			;sample_list-2
+				add	a,a
+				add	a,l
+				ld	l,a
+				ld	a,(hl)
+				inc	l
+				ld	h,(hl)
+				ld	l,a
+				ld	(sample_ptr+1),hl
+				ld	hl,RLC_HL
+				ld	(sample_read),hl
+				
+	skip_drum		
+				
+				bit	7,b			;check percussion flag
+				jp	z,skip_percussion
+				
+				res	7,b			;clear percussion flag
+				dec	b			;compensate speed
+				
+				ld	(noise_bc+1),bc
+				ld	(noise_de+1),de
+				
+				pop	hl			;read percussion parameters
+				
+				ld	a,l			;noise volume
+				ld	(noise_volume+1),a
+				ld	b,h			;noise pitch
+				ld	c,h
+				ld	de,$2174		;utz's rand seed			
+				exx
+				ld	bc,811			;noise duration, takes as long as inner sound loop
+				
+	noise_loop		
+				
+				exx				;4
+				dec	c			;4
+				jr	nz,noise_skip		;7/12
+				ld	c,b			;4
+				add	hl,de			;11
+				rlc	h			;8		utz's noise generator idea
+				inc	d			;4		improves randomness
+				jp	noise_next		;10
+				
+	noise_skip		
+				
+				jr	$+2			;12
+				jr	$+2			;12
+				nop				;4
+				nop				;4
+				
+	noise_next		
+				
+				ld	a,h			;4
+				
+	noise_volume		
+				cp	$80			;7
+				sbc	a,a			;4
+				and	60
+				or	1
+				out	(6),a			;11
+				exx				;4
+				
+				dec	bc			;6
+				ld	a,b			;4
+				or	c			;4
+				jp	nz,noise_loop		;10=106t
+				
+				exx
+				
+	noise_bc		
+				ld	bc,0
+	noise_de		
+				ld	de,0
+				
+				
+				
+	skip_percussion		
+				
+				ld	(pattern_ptr+1),sp
+				
+	sample_ptr		
+				ld	hl,0
+				
+				ld	c,0			;internal loop runs 256 times
+				
+	sound_loop		
+				
+	sample_read		
+				rlc	(hl)			;15 	rotate sample bits in place, rl (hl) or add ix,ix (dummy operation)
+				sbc	a,a			;4		sbc a,a to make bit into 0 or 255, or xor a to keep it 0
+				
+				dec	e			;4--+	count bits
+				jp	z,sample_cycle		;10 |
+				jp	sample_next		;10
+				
+	sample_cycle		
+				
+				ld	e,d			;4	|	reload counter
+				inc	hl			;6--+	advance pointer --24t
+				
+	sample_next		
+				
+				exx				;4		squeeker type unrolled code
+				ld	c,a			;4		save sample mask into C
+				
+				ld	sp,sound_list		;10
+				
+				pop	de			;10		ch0_acc
+				pop	hl			;10		ch0_add
+				add	hl,de			;11
+				ld	(ch0_acc),hl		;16
+				
+; mod by f&f				
+				ld	a,h
+				cp	$80
+				sbc	a,a
+				and	$0f
+				ld	b,a
+				
+				pop	de			;10		ch1_acc
+				pop	hl			;10		ch1_add
+				add	hl,de			;11
+				ld	(ch1_acc),hl		;16
+				
+; mod by f&f				
+				ld	a,h
+				cp	$80
+				sbc	a,a
+				and	$0f
+				add	a,b
+				ld	b,a
+				
+				pop	de			;10		ch2_acc
+				pop	hl			;10		ch2_add
+				add	hl,de			;11
+				ld	(ch2_acc),hl		;16
+				
+; mod by f&f				
+				ld	a,h
+				cp	$80
+				sbc	a,a
+				and	$0f
+				add	a,b
+				ld	b,a
+				
+				pop	de			;10		ch3_acc
+				pop	hl			;10		ch3_add
+				add	hl,de			;11
+				
+	noise_mode		ds	2,0			;8		rlc h for noise effects
+				ld	(ch3_acc),hl		;16
+				
+; mod by f&f				
+				ld	a,h
+				cp	$80
+				sbc	a,a
+				and	$0f
+				add	a,b
+				
+				or	c			;4		mix sample
+				
+				and	60
+				or	1
+				out	(6),a			;11
+				
+				exx				;4
+				
+				dec	c			;4
+				jp	nz,sound_loop		;10=336t
+				
+				
+				dec	hl			;last byte of a 256/8 byte sample packet is $80 means it was the last packet
+				ld	a,(hl)
+				inc	hl
+				cp	$80
+				jr	nz,sample_no_stop
+				
+				ld	hl,ADD_IX_IX
+				ld	(sample_read),hl	;disable sample reading
+				
+	sample_no_stop		
+				
+				djnz	sound_loop
+				
+				ld	(sample_ptr+1),hl
+				
+				jp	play_loop
+				
+				
+				
+;variables in the sound_list can't be reordered because of stack-based fetching
+				
+	sound_list		
+				
+	ch0_add			dw	0
+	ch0_acc			dw	0
+	ch1_add			dw	0
+	ch1_acc			dw	0
+	ch2_add			dw	0
+	ch2_acc			dw	0
+	ch3_add			dw	0
+	ch3_acc			dw	0
+				
+				nop
+				
+	music_data		
+				;compiled music data for end-music
+				
+	
+				dw	.pattern
+				dw	.loop
+				
+;sample data for logo music
+				
+	.sample_list_end	
+				dw	.sample_1
+				dw	.sample_2
+				dw	.sample_3
+				dw	.sample_4
+				dw	.sample_5
+				dw	.sample_6
+				dw	.sample_7
+				
+	.sample_1		
+				db	0,0,0,13,255,255,255,255,255,255,255,252,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,1,255,255,255,255,255
+				db	255,253,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,158,255,255
+				db	249,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128
+	.sample_2		
+				db	1,255,255,240,0,0,0,127,255,255,128,0,0,3,255,255
+				db	192,0,0,0,191,255,80,0,0,0,3,255,248,0,0,0
+				db	14,255,252,0,0,0,0,125,250,32,0,0,0,11,242,132
+				db	0,0,0,43,250,0,0,0,0,2,53,161,0,0,0,0
+				db	255,164,0,0,0,0,147,64,0,0,0,0,6,0,0,0
+				db	0,2,165,2,0,0,0,0,2,64,0,0,0,0,0,0
+				db	0,0,0,0,73,224,0,0,0,0,71,196,0,0,0,0
+				db	0,17,64,0,0,0,0,0,64,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	4,93,128,0,0,0,22,128,0,0,0,0,0,0,0,128
+	.sample_3		
+				db	0,0,0,80,131,4,128,0,2,17,128,0,0,0,0,160
+				db	4,74,0,0,0,2,64,0,128,0,16,0,0,0,0,0
+				db	0,0,0,0,56,2,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128
+	.sample_4		
+	.sample_5		
+	.sample_6		
+	.sample_7		
+				
+				
+	.pattern		
+				dw	$51f,$0,$268,$0,$0,NOP_2
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$562,$268
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$502,$19b
+				dw	$502,$19b
+				dw	$502,$337
+				dw	$502,$19b
+				dw	$562,$19b
+				dw	$502,$19b
+				dw	$562,$337
+				dw	$562,$19b
+				dw	$502,$268
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$562,$268
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$502,$1cd
+				dw	$502,$1cd
+				dw	$502,$39b
+				dw	$502,$1cd
+				dw	$562,$1cd
+				dw	$502,$1cd
+				dw	$562,$39b
+				dw	$562,$1cd
+				dw	$502,$268
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$562,$268
+				dw	$502,$268
+				dw	$502,$4d1
+				dw	$502,$268
+				dw	$502,$19b
+				dw	$502,$19b
+				dw	$502,$337
+				dw	$502,$19b
+				dw	$562,$19b
+				dw	$502,$19b
+				dw	$562,$337
+				dw	$562,$19b
+				dw	$502,$1cd
+				dw	$502,$1cd
+				dw	$562,$39b
+				dw	$562,$1cd
+				dw	$562,$1cd
+				dw	$502,$1cd
+				dw	$562,$39b
+				dw	$502,$1cd
+				dw	$522,$268
+				dw	$502,$268
+				dw	$542,$4d1
+				dw	$502,$268
+				dw	$542,$268
+				dw	$542,$268
+				dw	$522,$4d1
+				dw	$502,$268
+				dw	$52f,$134,$268,$0,$0
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$e6,$1cd
+				dw	$543,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$e6,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$543,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$52f,$e6,$1cd,$895,$0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$885
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$b74
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$b64
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$527,$e6,$1cd,$ad0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$ac0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$737
+				dw	$542,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$727
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$523,$e6,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$543,$206,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$ad0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54f,$2b4,$268,$819,$ac0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$52f,$15a,$2b4,$66e,$809
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$54b,$337,$2b4,$65e
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$527,$e6,$1cd,$44a
+				dw	$542,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$43a
+				dw	$502,$1cd
+				dw	$523,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$e6,$1cd,$895
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$885
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$b74
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$b64
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$527,$e6,$1cd,$ad0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$ac0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$737
+				dw	$542,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$727
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$523,$e6,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$543,$206,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$ad0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54f,$2b4,$268,$819,$ac0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$52f,$15a,$2b4,$66e,$809
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$54b,$337,$2b4,$65e
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$527,$e6,$1cd,$44a
+				dw	$542,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$43a
+				dw	$502,$1cd
+				dw	$523,$e6,$39b
+				dw	$502,$1cd
+				dw	$52f,$134,$268,$5ba,$0
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$cd,$19b,$3d2,$5aa
+				dw	$50f,$0,$19b,$0,$0
+				dw	$50f,$cd,$337,$3d2,$3c2
+				dw	$50f,$0,$19b,$0,$0
+				dw	$54f,$19b,$19b,$3d2,$3c2
+				dw	$50b,$0,$19b,$0
+				dw	$50b,$cd,$337,$3c2
+				dw	$503,$0,$19b
+				dw	$527,$134,$268,$5ba
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$e6,$1cd,$44a,$5aa
+				dw	$54f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$54f,$1cd,$1cd,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50b,$0,$1cd,$0
+				dw	$52f,$134,$268,$9a2,$43a
+				dw	$503,$0,$268
+				dw	$50b,$134,$4d1,$992
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$527,$cd,$19b,$66e
+				dw	$503,$0,$19b
+				dw	$50b,$cd,$337,$65e
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$527,$e6,$1cd,$737
+				dw	$503,$0,$1cd
+				dw	$50b,$e6,$39b,$727
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$527,$134,$268,$4d1
+				dw	$543,$0,$268
+				dw	$50b,$134,$4d1,$4c1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$52f,$134,$268,$5ba,$0
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$cd,$19b,$3d2,$5aa
+				dw	$50f,$0,$19b,$0,$0
+				dw	$50f,$cd,$337,$3d2,$3c2
+				dw	$50f,$0,$19b,$0,$0
+				dw	$54f,$19b,$19b,$3d2,$3c2
+				dw	$50b,$0,$19b,$0
+				dw	$50b,$cd,$337,$3c2
+				dw	$503,$0,$19b
+				dw	$527,$134,$268,$5ba
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$e6,$1cd,$44a,$5aa
+				dw	$54f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$54f,$1cd,$1cd,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50b,$0,$1cd,$0
+				dw	$52f,$134,$268,$e6e,$43a
+				dw	$503,$0,$268
+				dw	$50b,$134,$4d1,$e5e
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$507,$134,$4d1,$1033
+				dw	$503,$0,$268
+				dw	$52f,$cd,$19b,$e6e,$1023
+				dw	$503,$0,$19b
+				dw	$50f,$cd,$337,$cdc,$e5e
+				dw	$503,$0,$19b
+				dw	$54f,$19b,$19b,$c23,$ccc
+				dw	$503,$0,$19b
+				dw	$50f,$cd,$337,$ad0,$c13
+				dw	$503,$0,$19b
+				dw	$52f,$e6,$1cd,$737,$ac0
+				dw	$503,$0,$1cd
+				dw	$50b,$e6,$39b,$727
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$523,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$527,$134,$268,$9a2
+				dw	$543,$0,$268
+				dw	$54b,$134,$4d1,$992
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$543,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$52f,$e6,$1cd,$895,$0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$885
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$b74
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$b64
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$527,$e6,$1cd,$ad0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$ac0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$737
+				dw	$542,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$727
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$523,$e6,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$543,$206,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$ad0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54f,$2b4,$268,$819,$ac0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$52f,$15a,$2b4,$66e,$809
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$54b,$337,$2b4,$65e
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$527,$e6,$1cd,$44a
+				dw	$542,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$43a
+				dw	$502,$1cd
+				dw	$523,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$e6,$1cd,$895
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$885
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$b74
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$b64
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$527,$e6,$1cd,$ad0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$ac0
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$737
+				dw	$542,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54b,$2b4,$268,$727
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$523,$e6,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$543,$206,$1cd
+				dw	$502,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$527,$134,$268,$ad0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$54f,$2b4,$268,$819,$ac0
+				dw	$502,$268
+				dw	$563,$134,$4d1
+				dw	$502,$268
+				dw	$52f,$15a,$2b4,$66e,$809
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$54b,$337,$2b4,$65e
+				dw	$502,$2b4
+				dw	$563,$15a,$568
+				dw	$502,$2b4
+				dw	$527,$e6,$1cd,$44a
+				dw	$542,$1cd
+				dw	$563,$e6,$39b
+				dw	$502,$1cd
+				dw	$54b,$225,$1cd,$43a
+				dw	$502,$1cd
+				dw	$523,$e6,$39b
+				dw	$502,$1cd
+				dw	$50f,$0,$1c5,$5ba,$0
+				dw	$506,$1bd,$0
+				dw	$50e,$1b5,$5ba,$5aa
+				dw	$50e,$1ad,$0,$0
+				dw	$56e,$1a5,$5ba,$5aa
+				dw	$50e,$19d,$0,$0
+				dw	$50e,$195,$5ba,$5aa
+				dw	$50e,$18d,$0,$0
+				dw	$50e,$185,$3d2,$5aa
+				dw	$50e,$18b,$0,$0
+				dw	$50e,$183,$3d2,$3c2
+				dw	$50e,$17b,$0,$0
+				dw	$56e,$173,$3d2,$3c2
+				dw	$50a,$16b,$0
+				dw	$50a,$163,$3c2
+				dw	$502,$15b
+				dw	$506,$153,$5ba
+				dw	$506,$174,$0
+				dw	$50e,$16c,$5ba,$5aa
+				dw	$50e,$164,$0,$0
+				dw	$56e,$15c,$5ba,$5aa
+				dw	$50e,$154,$0,$0
+				dw	$50e,$14c,$5ba,$5aa
+				dw	$50e,$144,$0,$0
+				dw	$52e,$13c,$44a,$5aa
+				dw	$54c,$0,$0
+				dw	$50c,$44a,$43a
+				dw	$50c,$0,$0
+				dw	$54f,$1cd,$1cd,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50b,$0,$1cd,$0
+				dw	$52f,$134,$268,$9a2,$43a
+				dw	$503,$0,$268
+				dw	$50b,$134,$4d1,$992
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$527,$cd,$19b,$66e
+				dw	$503,$0,$19b
+				dw	$50b,$cd,$337,$65e
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$527,$e6,$1cd,$737
+				dw	$503,$0,$1cd
+				dw	$50b,$e6,$39b,$727
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$527,$134,$268,$4d1
+				dw	$543,$0,$268
+				dw	$50b,$134,$4d1,$4c1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$52f,$134,$268,$5ba,$0
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$cd,$19b,$3d2,$5aa
+				dw	$50f,$0,$19b,$0,$0
+				dw	$50f,$cd,$337,$3d2,$3c2
+				dw	$50f,$0,$19b,$0,$0
+				dw	$54f,$19b,$19b,$3d2,$3c2
+				dw	$50b,$0,$19b,$0
+				dw	$50b,$cd,$337,$3c2
+				dw	$503,$0,$19b
+				dw	$527,$134,$268,$5ba
+				dw	$507,$0,$268,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$54f,$268,$268,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$50f,$134,$4d1,$5ba,$5aa
+				dw	$50f,$0,$268,$0,$0
+				dw	$52f,$e6,$1cd,$44a,$5aa
+				dw	$54f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$54f,$1cd,$1cd,$44a,$43a
+				dw	$50f,$0,$1cd,$0,$0
+				dw	$50f,$e6,$39b,$44a,$43a
+				dw	$50b,$0,$1cd,$0
+				dw	$52f,$134,$268,$e6e,$43a
+				dw	$503,$0,$268
+				dw	$50b,$134,$4d1,$e5e
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$507,$134,$4d1,$1033
+				dw	$503,$0,$268
+				dw	$52f,$cd,$19b,$e6e,$1023
+				dw	$503,$0,$19b
+				dw	$50f,$cd,$337,$cdc,$e5e
+				dw	$503,$0,$19b
+				dw	$54f,$19b,$19b,$c23,$ccc
+				dw	$503,$0,$19b
+				dw	$50f,$cd,$337,$ad0,$c13
+				dw	$503,$0,$19b
+				dw	$52f,$e6,$1cd,$737,$ac0
+				dw	$503,$0,$1cd
+				dw	$50b,$e6,$39b,$727
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$523,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$547,$134,$268,$9a2
+				dw	$543,$0,$268
+				dw	$54b,$134,$4d1,$992
+				dw	$543,$0,$268
+				dw	$54f,$40c,$268,$1344,$1344
+				dw	$54e,$0,$1334,$1324
+				dw	$54d,$568,$131c,$130c
+				dw	$54c,$1304,$12fc
+				dw	$52f,$103,$206,$9a2,$972
+				dw	$50e,$206,$1344,$97a
+				dw	$56f,$103,$40c,$9a2,$982
+				dw	$50e,$206,$1846,$98a
+				dw	$54f,$268,$206,$9a2,$992
+				dw	$50e,$206,$1344,$1334
+				dw	$56f,$103,$40c,$9a2,$992
+				dw	$50e,$206,$1846,$1836
+				dw	$52f,$15a,$2b4,$66e,$992
+				dw	$50e,$2b4,$cdc,$1334
+				dw	$56f,$15a,$568,$66e,$992
+				dw	$50e,$2b4,$1033,$1836
+				dw	$54f,$308,$2b4,$66e,$65e
+				dw	$50e,$2b4,$cdc,$ccc
+				dw	$56f,$15a,$568,$66e,$65e
+				dw	$50e,$2b4,$1033,$1023
+				dw	$52f,$103,$206,$c23,$65e
+				dw	$50e,$206,$1846,$ccc
+				dw	$56f,$103,$40c,$c23,$65e
+				dw	$50e,$206,$1cdd,$1023
+				dw	$54f,$268,$206,$c23,$c13
+				dw	$50e,$206,$1846,$1836
+				dw	$56f,$103,$40c,$c23,$c13
+				dw	$50e,$206,$1cdd,$1ccd
+				dw	$52f,$15a,$2b4,$819,$c13
+				dw	$54e,$2b4,$1033,$1836
+				dw	$56f,$15a,$568,$819,$c13
+				dw	$50e,$2b4,$1344,$1ccd
+				dw	$54f,$308,$2b4,$819,$809
+				dw	$50e,$2b4,$1033,$1023
+				dw	$56f,$15a,$568,$819,$809
+				dw	$50e,$2b4,$1344,$1334
+				dw	$52f,$103,$206,$819,$809
+				dw	$50e,$206,$1033,$1023
+				dw	$56f,$103,$40c,$819,$809
+				dw	$50e,$206,$1344,$1334
+				dw	$54f,$245,$206,$819,$809
+				dw	$50e,$206,$1033,$1023
+				dw	$56f,$103,$40c,$819,$809
+				dw	$50e,$206,$1344,$1334
+				dw	$52f,$15a,$2b4,$c23,$809
+				dw	$50e,$2b4,$1846,$1023
+				dw	$56f,$15a,$568,$c23,$809
+				dw	$50e,$2b4,$1cdd,$1334
+				dw	$54f,$308,$2b4,$917,$c13
+				dw	$50a,$2b4,$1836
+				dw	$56b,$15a,$568,$c13
+				dw	$50a,$2b4,$1ccd
+				dw	$52f,$184,$308,$737,$907
+				dw	$506,$308,$737
+				dw	$567,$184,$611,$e6e
+				dw	$506,$308,$737
+				dw	$54f,$39b,$308,$1033,$727
+				dw	$50e,$308,$737,$727
+				dw	$56f,$184,$611,$e6e,$e5e
+				dw	$50e,$308,$737,$727
+				dw	$52f,$103,$206,$1033,$1023
+				dw	$54e,$206,$737,$727
+				dw	$56f,$103,$40c,$e6e,$e5e
+				dw	$50e,$206,$737,$727
+				dw	$54f,$268,$206,$9a2,$1023
+				dw	$50e,$206,$1344,$727
+				dw	$52f,$103,$40c,$9a2,$e5e
+				dw	$50e,$206,$1846,$727
+				dw	$52f,$103,$206,$9a2,$992
+				dw	$50e,$206,$1344,$1334
+				dw	$56f,$103,$40c,$9a2,$992
+				dw	$50e,$206,$1846,$1836
+				dw	$54f,$268,$206,$9a2,$992
+				dw	$50e,$206,$1344,$1334
+				dw	$56f,$103,$40c,$9a2,$992
+				dw	$50e,$206,$1846,$1836
+				dw	$52f,$15a,$2b4,$66e,$992
+				dw	$50e,$2b4,$cdc,$1334
+				dw	$56f,$15a,$568,$66e,$992
+				dw	$50e,$2b4,$1033,$1836
+				dw	$54f,$308,$2b4,$66e,$65e
+				dw	$50e,$2b4,$cdc,$ccc
+				dw	$56f,$15a,$568,$66e,$65e
+				dw	$50e,$2b4,$1033,$1023
+				dw	$52f,$103,$206,$c23,$65e
+				dw	$50e,$206,$1846,$ccc
+				dw	$56f,$103,$40c,$c23,$65e
+				dw	$50e,$206,$1cdd,$1023
+				dw	$54f,$268,$206,$c23,$c13
+				dw	$50e,$206,$1846,$1836
+				dw	$56f,$103,$40c,$c23,$c13
+				dw	$50e,$206,$1cdd,$1ccd
+				dw	$52f,$15a,$2b4,$819,$c13
+				dw	$54e,$2b4,$1033,$1836
+				dw	$56f,$15a,$568,$819,$c13
+				dw	$50e,$2b4,$1344,$1ccd
+				dw	$54f,$308,$2b4,$819,$809
+				dw	$50e,$2b4,$1033,$1023
+				dw	$56f,$15a,$568,$819,$809
+				dw	$50e,$2b4,$1344,$1334
+				dw	$52f,$103,$206,$819,$809
+				dw	$50e,$206,$1033,$1023
+				dw	$56f,$103,$40c,$819,$809
+				dw	$50e,$206,$1344,$1334
+				dw	$54f,$245,$206,$819,$809
+				dw	$50e,$206,$1033,$1023
+				dw	$56f,$103,$40c,$819,$809
+				dw	$50e,$206,$1344,$1334
+				dw	$52f,$15a,$2b4,$c23,$809
+				dw	$50e,$2b4,$1846,$1023
+				dw	$56f,$15a,$568,$c23,$809
+				dw	$50e,$2b4,$1cdd,$1334
+				dw	$54f,$308,$2b4,$917,$c13
+				dw	$50a,$2b4,$1836
+				dw	$56b,$15a,$568,$c13
+				dw	$50a,$2b4,$1ccd
+				dw	$52f,$184,$308,$737,$907
+				dw	$506,$308,$e6e
+				dw	$567,$184,$611,$737
+				dw	$506,$308,$1033
+				dw	$54f,$39b,$308,$737,$727
+				dw	$50e,$308,$e6e,$e5e
+				dw	$56f,$184,$611,$737,$727
+				dw	$50e,$308,$1033,$1023
+				dw	$52f,$103,$206,$9a2,$727
+				dw	$54e,$206,$1344,$e5e
+				dw	$56f,$103,$40c,$9a2,$727
+				dw	$50e,$206,$15a0,$1023
+				dw	$54f,$268,$206,$9a2,$992
+				dw	$50e,$206,$1344,$1334
+				dw	$52f,$103,$40c,$9a2,$992
+				dw	$50e,$206,$15a0,$1590
+				dw	$52f,$134,$268,$0,$992
+				dw	$50b,$0,$268,$1334
+				dw	$50b,$134,$4d1,$992
+				dw	$50b,$0,$268,$1590
+				dw	$54b,$268,$268,$98a
+				dw	$50b,$0,$268,$0
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$e6,$1cd
+				dw	$543,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$e6,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$543,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$e6,$1cd
+				dw	$543,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$503,$0,$268
+				dw	$503,$134,$4d1
+				dw	$503,$0,$268
+				dw	$523,$cd,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$543,$19b,$19b
+				dw	$503,$0,$19b
+				dw	$503,$cd,$337
+				dw	$503,$0,$19b
+				dw	$523,$e6,$1cd
+				dw	$503,$0,$1cd
+				dw	$503,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$543,$1cd,$1cd
+				dw	$503,$0,$1cd
+				dw	$523,$e6,$39b
+				dw	$503,$0,$1cd
+				dw	$523,$134,$268
+				dw	$543,$0,$268
+				dw	$543,$134,$4d1
+				dw	$503,$0,$268
+				dw	$543,$268,$268
+				dw	$543,$0,$268
+				dw	$523,$134,$4d1
+				dw	$503,$0,$268
+				dw	$52c,$4d1,$611
+				dw	$500
+				dw	$500
+				dw	$500
+				dw	$50f,$0,$0,$0,$0
+				dw	$500
+	.loop			
+				dw	$7f1f,0,0,0,0,NOP_2
+				dw	0
+				
+				end

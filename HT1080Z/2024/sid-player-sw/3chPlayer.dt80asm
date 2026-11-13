@@ -1,0 +1,382 @@
+				; HT-1080Z
+				org	17129
+				genbinary
+				
+				call	$01c9			; CLS
+				ld	hl,TITLE_PIC		; a HTPIC képünk címe
+				ld	de,$3c00		; a video memória címe
+				ld	bc,1024			; a video memória hossza (64*16 karakter)
+				ldir				; megjelenítjük
+
+	START_MUSIC		ld	HL,MUSIC_DATA-1		; -1 is needed because parsing is started with inc hl
+				ld	(MUSICPOS+1),HL
+				ld	(MUSIC_RESTART+1),HL
+				ld	ix,0			; reset phase accumulator registers
+				ld	iy,0
+				ld	hl,0
+				ld	(PAC1+1),hl		; reset phase accumulator counters
+				ld	(PAC2+1),hl
+				ld	(PAC3+1),hl
+				
+; init AY chip, disable Tone and Noise generator for all 3 channels 
+				ld	a,7			; R7 = $FF
+				out	($1F),a			; MIXER = $ff -> disable tone + noise for all channel
+				ld	a,255
+				out	($1E),a
+				
+;******************************************************************
+; BALANCED FIX CYCLE TIME SOUND GENERATOR + MUSIC PLAYER LOOP
+; Balanced execution time: 276 + 453 =  729 cycle 
+; Sound generator frequency: 1774080/729 cycle = 2433.58 Hz
+;
+; IX = channel 1 phase accumulator 
+; IY = channel 2 phase accumulator 
+; HL = channel 3 phase accumulator 
+;******************************************************************           
+	BALANCER		ld	b,31			; 7	BALANCED: 453 cycle
+	B_LOOP			dec	b			; 31*(4+10) = 434
+				jp	nz,B_LOOP		; 10
+				nop				; 4
+				nop				; 4
+				nop				; 4
+				
+	SOUND_GENERATOR		
+				
+; alter phase accumulator counter for channel 1
+	PAC1			ld	BC,$0000		; 10
+				add	IX,BC			; 15	IX = IX + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 2
+	PAC2			ld	BC,$0000		; 10
+				add	IY,BC			; 15 	IY = IY + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 3
+	PAC3			ld	BC,$0000		; 10
+				add	HL,BC			; 11 	HL = HL + phase accumulator freq const
+				
+				ld	C,$80			; 7
+				
+; set mixed value for channel 1 based on pac1 msb				
+				ld	A,8			; 10
+				out	($1F),A			; 11
+				ld	A,IXH			; 8
+				cp	C			; 4	check highest bit of PAC1
+				sbc	A,A			; 4	
+				and	$0F			; 7
+				out	($1E),a			; 11
+				
+; set mixed value for channel 2 based on pac2 msb				
+				ld	A,9			; 10
+				out	($1F),A			; 11
+	TO_CH2			ld	A,IYH			; 8
+				cp	C			; 4	check highest bit of PAC2
+				sbc	A,A			; 4	
+				and	$0F			; 7
+				out	($1E),a			; 11		
+				
+; set mixed value for channel 3 based on pac3 msb				
+				ld	A,10			; 10
+				out	($1F),A			; 11
+	TO_CH3			ld	A,H			; 4
+				cp	C			; 4	check highest bit of PAC3
+				sbc	A,A			; 4	
+				and	$0F			; 7
+				out	($1E),a			; 11
+				
+				; One way to generate digital sound on an AY chip is to set both the tone and noise signals off in the mix.
+				; This will result in a permanent high output, which can then be modulated with the volume control to produce a waveform
+				; R7 mixer = $ff
+				; R8 channel A amplitude (lowest 4 bit -> and $0F
+				; R9 channel B amplitude
+				; R10 channel C amplitude
+				; AY RSEL = $1F, RDAT = $1E on HT-1080Z
+				
+				
+	BPM_COUNTER		ld	a,BPM			; 10
+				dec	a			; 4
+				ld	(BPM_COUNTER+1),a	; 13
+				jp	NZ,BALANCER		; 10
+;----------------------------------------------------------------------------------------------------------------------------------------------
+; from here all cycle is need to be balanced by BALANCER
+				
+				ld	a,BPM			; 10 	reset BPM counter 
+				ld	(BPM_COUNTER+1),a	; 13
+				
+				push	HL			; 11	SAVE HL which is phase accumulator for CH3
+; parse record							
+	MUSICPOS		ld	HL,MUSIC_DATA-1		; 10
+				ld	d,$45			; 7	high address of sound frequency constant lookup table
+	MP_CH1			inc	hl			; 6
+				ld	a,(hl)			; 7	load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; 7	first byte can be LOOP control
+				jp	nz,MP_SKIP_BALANCE	; 10
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; 10	reset music data pointer
+				ld	(MUSICPOS+1),HL		; 16
+				inc	hl			; 6
+				ld	a,(hl)			; 7	load first byte of music record after music restart
+				jp	MP_SKIP			; 10
+				
+; balance the previous JP NZ instruction				
+	MP_SKIP_BALANCE		jp	MP_SKIP_BAL_1		; 10	BALANCED: 10+16+6+7+10 = 49
+	MP_SKIP_BAL_1		jp	MP_SKIP_BAL_2		; 10
+	MP_SKIP_BAL_2		jp	MP_SKIP_BAL_3		; 10
+	MP_SKIP_BAL_3		ld	B,(IY+0)		; 19	no meaning just for 19 cycle
+				
+; continue processing music record				
+	MP_SKIP			cp	SKIP			; 7
+				jp	z,MP_CH2_BALANCE	; 10	SKIP -> skip channel 1
+; handle normal musical note on CH1
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; 7	load frequ constant for CH1
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC1+1),BC		; 20	put into CH1 freq constant in irq handler    	
+				jp	MP_CH2			; 10
+				
+; balance the previous JP Z instruction						
+	MP_CH2_BALANCE		jp	MP_CH2_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_CH2_BAL_1		jp	MP_CH2_BAL_2		; 10
+	MP_CH2_BAL_2		jp	MP_CH2_BAL_3		; 10
+	MP_CH2_BAL_3		jp	MP_CH2_BAL_4		; 10
+	MP_CH2_BAL_4		jp	MP_CH2_BAL_5		; 10
+	MP_CH2_BAL_5		jp	MP_CH2_BAL_6		; 10
+	MP_CH2_BAL_6		jp	MP_CH2			; 10
+				
+	MP_CH2			inc	hl			; 6
+				ld	a,(hl)			; 7
+; check control codes for channel 2
+				cp	SKIP			; 7
+				jp	z,MP_CH3_BALANCE	; 10	SKIP -> skip channel 2
+; handle normal musical note on CH2
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table
+				ld	a,(de)			; 7	load frequ constant for CH2
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC2+1),BC		; 20	put into CH2 freq constant in irq handler     
+				jp	MP_CH3			; 10
+				
+; balance the previous JP Z instruction						
+	MP_CH3_BALANCE		jp	MP_CH3_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_CH3_BAL_1		jp	MP_CH3_BAL_2		; 10
+	MP_CH3_BAL_2		jp	MP_CH3_BAL_3		; 10
+	MP_CH3_BAL_3		jp	MP_CH3_BAL_4		; 10
+	MP_CH3_BAL_4		jp	MP_CH3_BAL_5		; 10
+	MP_CH3_BAL_5		jp	MP_CH3_BAL_6		; 10
+	MP_CH3_BAL_6		jp	MP_CH3			; 10				
+				
+				
+	MP_CH3			inc	hl			; 6
+				ld	a,(hl)			; 7
+; check control codes for channel 3
+				cp	SKIP			; 7
+				jp	z,MP_END_BALANCE	; 10	SKIP -> skip channel 3
+				
+; handle normal musical note on CH3
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table
+				ld	a,(de)			; 7	load frequ constant for CH3
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC3+1),BC		; 20	put into CH3 freq constant in irq handler    				
+				jp	MP_END			; 10
+				
+; balance the previous JP Z instruction						
+	MP_END_BALANCE		jp	MP_END_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_END_BAL_1		jp	MP_END_BAL_2		; 10
+	MP_END_BAL_2		jp	MP_END_BAL_3		; 10
+	MP_END_BAL_3		jp	MP_END_BAL_4		; 10
+	MP_END_BAL_4		jp	MP_END_BAL_5		; 10
+	MP_END_BAL_5		jp	MP_END_BAL_6		; 10
+	MP_END_BAL_6		jp	MP_END			; 10	
+				
+	MP_END			ld	(MUSICPOS+1),HL		; 16
+				pop	HL			; 10
+				jp	SOUND_GENERATOR		; 10
+				
+				org	$4500
+				; Freq divider table for musical sounds at 2433.58 Hz sound generator frequency (address must be divisible by 256)	
+				dw	881			; 32.7 Hz	C1
+				dw	933			; 34.65 Hz	CISZ1
+				dw	989			; 36.71 Hz	D1
+				dw	1047			; 38.89 Hz	DISZ1
+				dw	1110			; 41.2 Hz	E1
+				dw	1175			; 43.65 Hz	F1
+				dw	1246			; 46.25 Hz	FISZ1
+				dw	1320			; 49 Hz	G1
+				dw	1398			; 51.91 Hz	GISZ1
+				dw	1481			; 55 Hz	A1
+				dw	1569			; 58.27 Hz	AISZ1
+				dw	1663			; 61.74 Hz	B1
+				dw	1761			; 65.41 Hz	C2
+				dw	1866			; 69.3 Hz	CISZ2
+				dw	1977			; 73.42 Hz	D2
+				dw	2095			; 77.78 Hz	DISZ2
+				dw	2219			; 82.41 Hz	E2
+				dw	2351			; 87.31 Hz	F2
+				dw	2491			; 92.5 Hz	FISZ2
+				dw	2639			; 98 Hz	G2
+				dw	2796			; 103.83 Hz	GISZ2
+				dw	2962			; 110 Hz	A2
+				dw	3138			; 116.54 Hz	AISZ2
+				dw	3325			; 123.47 Hz	B2
+				dw	3523			; 130.81 Hz	C3
+				dw	3732			; 138.59 Hz	CISZ3
+				dw	3954			; 146.83 Hz	D3
+				dw	4189			; 155.56 Hz	DISZ3
+				dw	4438			; 164.81 Hz	E3
+				dw	4702			; 174.61 Hz	F3
+				dw	4982			; 185 Hz	FISZ3
+				dw	5278			; 196 Hz	G3
+				dw	5592			; 207.65 Hz	GISZ3
+				dw	5925			; 220 Hz	A3
+				dw	6277			; 233.08 Hz	AISZ3
+				dw	6650			; 246.94 Hz	B3
+				dw	7046			; 261.63 Hz	C4
+				dw	7464			; 277.18 Hz	CISZ4
+				dw	7908			; 293.66 Hz	D4
+				dw	8379			; 311.13 Hz	DISZ4
+				dw	8877			; 329.63 Hz	E4
+				dw	9405			; 349.23 Hz	F4
+				dw	9964			; 369.99 Hz	FISZ4
+				dw	10557			; 392 Hz	G4
+				dw	11184			; 415.3 Hz	GISZ4
+				dw	11849			; 440 Hz	A4
+				dw	12554			; 466.16 Hz	AISZ4
+				dw	13300			; 493.88 Hz	B4
+				dw	14091			; 523.25 Hz	C5
+				dw	14929			; 554.37 Hz	CISZ5
+				dw	15817			; 587.33 Hz	D5
+				dw	16757			; 622.25 Hz	DISZ5
+				dw	17754			; 659.25 Hz	E5
+				dw	18809			; 698.46 Hz	F5
+				dw	19928			; 739.99 Hz	FISZ5
+				dw	21113			; 783.99 Hz	G5
+				dw	22368			; 830.61 Hz	GISZ5
+				dw	23698			; 880 Hz	A5
+				dw	25108			; 932.33 Hz	AISZ5
+				dw	26601			; 987.77 Hz	B5
+				dw	28182			; 1046.5 Hz	C6
+				dw	29858			; 1108.73 Hz	CISZ6
+				dw	31633			; 1174.66 Hz	D6
+
+				dw	0			; 0 Hz		MUTE
+				; definition of music data record elements
+				; musical sounds C1-C8	
+				
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	40
+	E6			equ	41			; above D6 all sound is transposed
+	F6			equ	42
+	FISZ6			equ	43
+	G6			equ	44
+	GISZ6			equ	45
+	A6			equ	46
+	AISZ6			equ	47
+	B6			equ	48
+				
+	C7			equ	49
+	CISZ7			equ	50
+	D7			equ	51
+	DISZ7			equ	52
+	E7			equ	53
+	F7			equ	54
+	FISZ7			equ	55
+	G7			equ	56
+	GISZ7			equ	57
+	A7			equ	58
+	AISZ7			equ	59
+	B7			equ	60
+				
+	C8			equ	61
+				
+	MUTE			equ	74			; 0 Hz	channel is muted			
+	SKIP			equ	$fe			; skip actual channel
+	LOOP			equ	$ff			; loop entire music			
+				
+	BPM			equ	49			; ( BPM = 49 for 50Hz SID conversions)
+				
+	TITLE_PIC		incbin	"title_pic.htpic"
+
+				; MUSIC DATA RECORDS
+				
+	MUSIC_DATA		#include	"Turrican_III_Remix.sid.txt"
+				
+				db	LOOP			; LOOPMUSIC    				
+				
+				end

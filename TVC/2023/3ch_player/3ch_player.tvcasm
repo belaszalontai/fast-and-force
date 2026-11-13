@@ -1,0 +1,442 @@
+﻿                                   ORG                 6639                          ; A program kezdőcíme
+; BASIC Header
+                                   DB                  $0F,$0A,$0,$DD                ; "10 PRINT" - basic token
+                                   DB                  ' USR'                        ; " USR"
+                                   DB                  $96                           ; "("
+                                   DB                  '6659'                        ; "6659"
+                                   DB                  $95,$FF                       ; ")"
+                                   DB                  0,0,0,0,0                     ; 5 db 0, hogy 6659-nél kezdődjön a kód
+                                   
+;******************************************************************
+; 3 channel MUSIC player for VIDEOTON TVC
+; (c) 2023 by Szalontai Béla (Fast and Force)
+; v1.1 (2023.12.26)
+;******************************************************************
+                                   JP                  MAIN                          
+                                   
+;******************************************************************
+; INTERRUPT HANDLER 
+; Worst Case Execution time: 183 cycle (channel dividers must be different, otherwise 340)
+; Interrupt Frequency: ~13950 Hz
+; CPU load by IRQ: 82%
+;
+; EXX D = channel 1 act val
+; EXX B = channel 2 act val
+; EXX C = channel 3 act val
+;
+; EXX E = channel 1 act div
+; EXX H = channel 2 act div
+; EXX L = channel 3 act div
+;******************************************************************                                         
+               IT_HANDLER          EX                  AF,AF'
+               
+               
+               
+               
+                                   EXX                                               ; 4+4
+                                   OUT                 (7),A                         ; 11  	ack interrupt
+; CHANNEL 1                     
+                                   DB                  $18                           ; 12 	JR MIH1 (disable channel)
+               CH1_ENABLED         DB                  $0F                           ;		or JR MIH00 <= $0F / $00 (enable channel)
+                                   DEC                 E                             ; 4	Handle Channel 1    
+                                   JR                  NZ,MIH1                       ; 12
+                                   DB                  $1E                           ; 7	LD E,n
+               CH1_DIVIDER         DB                  $01                           
+                                   LD                  A,D                           ; 4	D = channel 1 act val
+                                   OR                  A                             ; 4
+                                   JR                  NZ,MIH0_1                     ; 12
+                                   DB                  $16                           ; 7	ld D,n                           
+               CH1_VOLUME          DB                  $00                           
+                                   JR                  MIH1                          ; 12
+               MIH0_1              LD                  D,0                           ; 7
+               
+; CHANNEL 2 
+               MIH1                DB                  $18                           ; 12 	JR MIH1 (disable channel)
+               CH2_ENABLED         DB                  $0F                           ;		or JR MIH00 <= $0F / $00 (enable channel)
+                                   DEC                 H                             ; 4	Handle Channel 2
+                                   JR                  NZ,MIH2                       ; 12
+                                   DB                  $26                           ; 7	LD H,n
+               CH2_DIVIDER         DB                  $02                           
+                                   LD                  A,B                           ; 4	B = channel 2 act val
+                                   OR                  A                             ; 4
+                                   JR                  NZ,MIH1_1                     ; 12
+                                   DB                  $06                           ; 7 	LD B,n
+               CH2_VOLUME          DB                  $00                           
+                                   JR                  MIH2                          ; 12
+               MIH1_1              LD                  B,0                           ; 7
+               
+; CHANNEL 3               
+               MIH2                DB                  $18                           ; 12 	JR MIH1 (disable channel)
+               CH3_ENABLED         DB                  $0F                           ;		or JR MIH00 <= $0F / $00 (enable channel)
+                                   DEC                 L                             ; 4	Handle Channel 3
+                                   JR                  NZ,MIXER                      ; 12
+                                   DB                  $2E                           ; 7	LD L,n                           
+               CH3_DIVIDER         DB                  $03                           
+                                   LD                  A,C                           ; 4
+                                   OR                  A                             ; 4
+                                   JR                  NZ,MIH2_1                     ; 12
+                                   DB                  $0E                           ; 7	LD C,n
+               CH3_VOLUME          DB                  $00                           
+                                   JR                  MIXER                         ; 12
+               MIH2_1              LD                  C,0                           ; 7
+               
+               MIXER               LD                  A,D                           ; 4
+                                   ADD                 A,B                           ; 4
+                                   ADD                 A,C                           ; 4                        
+                                   AND                 60                            ; 7		mask
+                                   OR                  1                             ; 7		must have in 4 color graphics mode
+                                   OUT                 (6),A                         ; 11		write to sound port
+                                   EXX                                               ; 4 + 4
+                                   EX                  AF,AF'
+                                   
+                                   
+                                   
+                                   
+                                   EI                                                ; 4
+                                   RET                                               ; 10
+                                   
+;******************************************************************
+; INIT MUSIC MIXER INTERRUPT HANDLER
+;******************************************************************
+               IT_HANDLER_1        DB                  0                             
+               IT_HANDLER_2        DB                  0                             
+               IT_HANDLER_3        DB                  0                             
+               
+               START_MUSIC_MIXER   LD                  A,10                          ; disable CRTC CURSOR IT
+                                   OUT                 (112),A                       
+                                   LD                  A,35                          
+                                   OUT                 (113),A                       
+                                   LD                  A,$F2                         ; Sound IT counter divider LO
+                                   OUT                 (4),A                         ; (4096 - 14 = 4081 = $0FF2)
+                                   LD                  A,32+$0F                      ; Sound IT enabled, sound is OFF + divider HI
+                                   OUT                 (5),A                         ; IT frequency = Fsys / 16 / 14 = ~13950 Hz
+                                   LD                  A,(56)                        ; SAVE IT HANDLER
+                                   LD                  (IT_HANDLER_1),A              
+                                   LD                  A,(57)                        
+                                   LD                  (IT_HANDLER_2),A              
+                                   LD                  A,(58)                        
+                                   LD                  (IT_HANDLER_3),A              
+                                   LD                  A,195                         ; @038h -> JP 1A06 -> Address of IT_HANDLER
+                                   LD                  (56),A                        
+                                   LD                  A,$06                         ; can be relocated! from $1A06
+                                   LD                  (57),A                        
+                                   LD                  A,$1A                         
+                                   LD                  (58),A                        ; set the new IT handler
+                                   EI                                                ; enable interrupt
+                                   RET                                               
+                                   
+;******************************************************************
+; RESTORE INTERRUPT HANDLER
+;******************************************************************
+               STOP_MUSIC_MIXER    DI                                                
+                                   LD                  A,10                          ; restore the original interrupt
+                                   OUT                 (112),A                       
+                                   LD                  A,3                           
+                                   OUT                 (113),A                       ; CURSOR IT enabled
+                                   XOR                 A                             
+                                   OUT                 (4),A                         
+                                   OUT                 (5),A                         ; Sound IT disabled, Sound is OFF
+                                   LD                  A,(IT_HANDLER_1)              ; RESTORE IT HANDLER
+                                   LD                  (56),A                        
+                                   LD                  A,(IT_HANDLER_2)              
+                                   LD                  (57),A                        
+                                   LD                  A,(IT_HANDLER_3)              
+                                   LD                  (58),A                        
+                                   EI                                                
+                                   RET                                               
+                                   
+;******************************************************************
+; Handling volume decay + vibrato
+;******************************************************************                                
+               SOUND_PROCESSOR     LD                  HL,CH1_VOLUME                 
+                                   LD                  DE,AD1                        
+                                   
+; process Channel 1                               
+                                   LD                  A,(HL)                        ; check if the channel 1 is finished 
+                                   OR                  A                             
+                                   JR                  NZ,PV1                        
+                                   LD                  A,$0F                         
+                                   LD                  (CH1_ENABLED),A               ; disable CH 1
+                                   JR                  SP_CH2_1                      
+               PV1                 LD                  A,(DE)                        
+                                   DB                  $D6                           ; SUB pedal_value                             
+               PEDAL_VALUE1        DB                  $00                           
+                                   LD                  (DE),A                        
+                                   JR                  NZ,VIBRATO_1                  
+                                   DEC                 (HL)                          ; duration for ch11 is over lets decrement volume
+               VIBRATO_1           LD                  A,(AVD)                       
+                                   OR                  A                             
+                                   JR                  NZ,SP_CH2_1                   
+                                   LD                  A,(CH1_FREQ_MOD)              
+                                   XOR                 1                             
+                                   LD                  (CH1_FREQ_MOD),A              
+                                   JR                  NZ,SP_CH2_0                   
+                                   LD                  A,(CH1_DIVIDER)               ; modulation
+               VIBRATO_1_INC       DB                  $00                           ; NOP / INC A -> $00 / $3C
+                                   LD                  (CH1_DIVIDER),A               
+                                   JR                  SP_CH2_1                      
+               SP_CH2_0            LD                  A,(CH1_DIVIDER)               ; modulation
+               VIBRATO_1_DEC       DB                  $00                           ; NOP / DEC A -> $00 / $3D                             
+                                   LD                  (CH1_DIVIDER),A               
+                                   
+; process Channel 2                                
+               SP_CH2_1            INC                 DE                            
+                                   LD                  HL,CH2_VOLUME                 
+                                   LD                  A,(HL)                        ; check if the channel 2 is finished 
+                                   OR                  A                             
+                                   JR                  NZ,PV2                        
+                                   LD                  A,$0F                         
+                                   LD                  (CH2_ENABLED),A               ; disable CH 2
+                                   JR                  SP_CH3_1                      
+               PV2                 LD                  A,(DE)                        
+                                   DB                  $D6                           ; SUB pedal_value                             
+               PEDAL_VALUE2        DB                  $00                           
+                                   LD                  (DE),A                        
+                                   JR                  NZ,VIBRATO_2                  
+                                   DEC                 (HL)                          ; duration for ch2 is over lets decrement volume
+               VIBRATO_2           LD                  A,(AVD)                       
+                                   OR                  A                             
+                                   JR                  NZ,SP_CH3_1                   
+                                   LD                  A,(CH2_FREQ_MOD)              
+                                   XOR                 1                             
+                                   LD                  (CH2_FREQ_MOD),A              
+                                   JR                  NZ,SP_CH3_0                   
+                                   LD                  A,(CH2_DIVIDER)               ; modulation
+               VIBRATO_2_INC       DB                  $00                           ; NOP / INC A -> $00 / $3C                             
+                                   LD                  (CH2_DIVIDER),A               
+                                   JR                  SP_CH3_1                      
+               SP_CH3_0            LD                  A,(CH2_DIVIDER)               ; modulation
+               VIBRATO_2_DEC       DB                  $00                           ; NOP / DEC A -> $00 / $3D                             
+                                   LD                  (CH2_DIVIDER),A               
+                                   
+; process Channel 2                                
+               SP_CH3_1            INC                 DE                            
+                                   LD                  HL,CH3_VOLUME                 
+                                   LD                  A,(HL)                        ; check if the channel 3 is finished 
+                                   OR                  A                             
+                                   JR                  NZ,PV3                        
+                                   LD                  A,$0F                         
+                                   LD                  (CH3_ENABLED),A               ; disable CH 3
+                                   JR                  SP_END_1                      
+               PV3                 LD                  A,(DE)                        
+                                   DB                  $D6                           ; SUB pedal_value                             
+               PEDAL_VALUE3        DB                  $00                           
+                                   LD                  (DE),A                        
+                                   JR                  NZ,VIBRATO_3                  
+                                   DEC                 (HL)                          ; duration for ch3 is over lets decrement volume
+               VIBRATO_3           LD                  A,(AVD)                       
+                                   OR                  A                             
+                                   JR                  NZ,SP_END_1                   
+                                   LD                  A,(CH3_FREQ_MOD)              
+                                   XOR                 1                             
+                                   LD                  (CH3_FREQ_MOD),A              
+                                   JR                  NZ,SP_END_0                   
+                                   LD                  A,(CH3_DIVIDER)               ; modulation
+               VIBRATO_3_INC       DB                  $00                           ; NOP / INC A -> $00 / $3C                             
+                                   LD                  (CH3_DIVIDER),A               
+                                   JR                  SP_END_1                      
+               SP_END_0            LD                  A,(CH3_DIVIDER)               ; modulation
+               VIBRATO_3_DEC       DB                  $00                           ; NOP / DEC A -> $00 / $3D                             
+                                   LD                  (CH3_DIVIDER),A               
+               SP_END_1            RET                                               
+               
+;******************************************************************
+; MAIN PROGRAM
+;******************************************************************
+               MAIN                DI                                                ; IT disabled
+                                   EXX                                               ; save ex registers
+                                   PUSH                HL                            
+                                   PUSH                BC                            
+                                   PUSH                DE                            
+                                   LD                  DE,$0001                      ; reset channel dividers and volumes                        
+                                   LD                  BC,$0000                      
+                                   LD                  HL,$0101                      
+                                   EXX                                               
+                                   CALL                START_MUSIC_MIXER             ; starts SOUND GENERATOR INTERRUPT
+                                   
+;--------------------------------------------------------------------------------------------------------------------------------------
+                                   LD                  HL,MUSIC_DATA                 
+                                   LD                  BC,$0001                      ; no duration for first record            
+                                   LD                  (DURATION_COUNTER),BC         
+                                   
+               RUNLOOP             HALT                                              ; wait for next interrupt
+               
+                                   PUSH                HL                            
+                                   CALL                SOUND_PROCESSOR               
+                                   POP                 HL                            
+                                   
+                                   LD                  A,7                           ; check the ESC button
+                                   OUT                 (3),A                         ; select 7th row of keyboard matrix
+                                   IN                  A,(88)                        ; read keyboard matrix row
+                                   BIT                 3,A                           ; check ESC key is pressed                           
+                                   JR                  NZ,PLAY                       
+                                   JP                  VEGE                          
+                                   
+               PLAY                LD                  A,(AVD)                       ; alter vibrato duration counter
+                                   SUB                 $04                           
+                                   LD                  (AVD),A                       
+                                   
+                                   LD                  BC,(DURATION_COUNTER)         ; count duration
+                                   DEC                 BC                            
+                                   LD                  (DURATION_COUNTER),BC         
+                                   LD                  A,B                           
+                                   OR                  C                             
+                                   JR                  NZ,RUNLOOP                    
+                                   LD                  BC,$0400                      ; $0800 / (3125000/16/14) = 2,34 sec
+                                   LD                  (DURATION_COUNTER),BC         
+                                   
+                                   LD                  A,(HL)                        ; parsing next music record
+                                   CP                  $FF                           ; end of music
+                                   JR                  NZ,PLAY_NEXT                  
+                                   JP                  VEGE                          
+                                   
+               PLAY_NEXT           LD                  A,(HL)                        ; CH1 freq_divider
+                                   LD                  (CH1_DIVIDER),A               
+                                   LD                  A,VOL_MIX_CONST               
+                                   LD                  (CH1_VOLUME),A                
+                                   XOR                 A                             
+                                   LD                  (CH1_ENABLED),A               
+                                   LD                  A,240                         
+                                   LD                  (AD1),A                       
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH1 decay_counter
+                                   LD                  (PEDAL_VALUE1),A              
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH1 freq_mod 0 = off 1 = ON
+                                   OR                  A                             
+                                   JR                  NZ,PN_CH1_1                   
+                                   LD                  (VIBRATO_1_INC),A             ; A = 0
+                                   LD                  (VIBRATO_1_DEC),A             
+                                   JR                  PLAY_CH2                      
+               PN_CH1_1            LD                  A,$3C                         
+                                   LD                  (VIBRATO_1_INC),A             
+                                   LD                  A,$3D                         
+                                   LD                  (VIBRATO_1_DEC),A             
+                                   
+               PLAY_CH2            INC                 HL                            ; next channel
+                                   LD                  A,(HL)                        ; CH2 freq_divider
+                                   LD                  (CH2_DIVIDER),A               
+                                   LD                  A,VOL_MIX_CONST               
+                                   LD                  (CH2_VOLUME),A                
+                                   XOR                 A                             
+                                   LD                  (CH2_ENABLED),A               
+                                   LD                  A,240                         
+                                   LD                  (AD2),A                       
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH2 decay_counter
+                                   LD                  (PEDAL_VALUE2),A              
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH2 freq_mod 0 = off 1 = ON
+                                   OR                  A                             
+                                   JR                  NZ,PN_CH2_1                   
+                                   LD                  (VIBRATO_2_INC),A             ; A = 0
+                                   LD                  (VIBRATO_2_DEC),A             
+                                   JR                  PLAY_CH3                      
+               PN_CH2_1            LD                  A,$3C                         
+                                   LD                  (VIBRATO_2_INC),A             
+                                   LD                  A,$3D                         
+                                   LD                  (VIBRATO_2_DEC),A             
+                                   
+               PLAY_CH3            INC                 HL                            ; next channel
+               
+                                   LD                  A,(HL)                        ; CH3 freq_divider
+                                   LD                  (CH3_DIVIDER),A               
+                                   LD                  A,VOL_MIX_CONST               
+                                   LD                  (CH3_VOLUME),A                
+                                   XOR                 A                             
+                                   LD                  (CH3_ENABLED),A               
+                                   LD                  A,240                         
+                                   LD                  (AD3),A                       
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH3 decay_counter
+                                   LD                  (PEDAL_VALUE3),A              
+                                   INC                 HL                            
+                                   LD                  A,(HL)                        ; CH3 freq_mod 0 = off 1 = ON
+                                   OR                  A                             
+                                   JR                  NZ,PN_CH3_1                   
+                                   LD                  (VIBRATO_3_INC),A             ; A = 0
+                                   LD                  (VIBRATO_3_DEC),A             
+                                   JR                  PLAY_NEXT_RECORD              
+               PN_CH3_1            LD                  A,$3C                         
+                                   LD                  (VIBRATO_3_INC),A             
+                                   LD                  A,$3D                         
+                                   LD                  (VIBRATO_3_DEC),A             
+                                   
+               PLAY_NEXT_RECORD    INC                 HL                            ; next record
+                                   JP                  RUNLOOP                       
+                                   
+               VEGE                CALL                STOP_MUSIC_MIXER              ; stops SOUND GENERATOR INTERRUPT
+                                   EXX                                               ; restore ex registers
+                                   POP                 DE                            
+                                   POP                 BC                            
+                                   POP                 HL                            
+                                   EXX                                               
+                                   RET                                               
+                                   
+               VOL_MIX_CONST       EQU                 20                            
+               
+               AD1                 DB                  0                             ; actual duration 1
+               AD2                 DB                  0                             ; actual duration 2
+               AD3                 DB                  0                             ; actual duration 3
+               
+               AVD                 DB                  0                             ; actual vibrato duration
+               
+               CH1_FREQ_MOD        DB                  1                             ; channel 1 frequency modulation = 1 ON = 0 OFF
+               CH2_FREQ_MOD        DB                  1                             ; channel 2 frequency modulation = 1 ON = 0 OFF
+               CH3_FREQ_MOD        DB                  1                             ; channel 3 frequency modulation = 1 ON = 0 OFF   
+               
+               DURATION_COUNTER    DW                  $0001                         
+               
+               
+; MUSIC DATA RECORDS
+; 	CHANNEL 1 freq_counter, decay_counter, freq_mod
+; 	CHANNEL 2 freq_counter, decay_counter, freq_mod
+; 	CHANNEL 3 freq_counter, decay_counter, freq_mod
+; decay_counter: 0 -> constant volume, no decay or 2,4,8,16 -> decay speed slow to fast
+; freq_mod: frequency modulation = 1 ON = 0 OFF
+; freq_counter: 
+;  $77 - sound: C1       
+;  $71 - sound: C#1       
+;  $6A - sound: D1       
+;  $64 - sound: D#1       
+;  $5F - sound: E1       
+;  $59 - sound: F1
+;  $54 - sound: F#1       
+;  $50 - sound: G1       
+;  $4B - sound: G#1       
+;  $47 - sound: A1       
+;  $43 - sound: A#1      
+;  $3F - sound: B1       
+;  $3C - sound: C2
+;  $38 - sound: C#2       
+;  $35 - sound: D2       
+;  $32 - sound: D#2      
+;  $2F - sound: E2       
+;  $2D - sound: F2       
+;  $2A - sound: F#2       
+;  $28 - sound: G2       
+;  $26 - sound: G#2       
+;  $24 - sound: A2       
+;  $22 - sound: A#2
+;  $20 - sound: B2       
+;  $1E - sound: C3       
+;  $1C - sound: C#3       
+;  $1B - sound: D3       
+;  $19 - sound: D#3       
+;  $18 - sound: E3       
+;  $16 - sound: F3       
+;  $15 - sound: F#3       
+;  $14 - sound: G3       
+;  $13 - sound: G#3       
+;  $12 - sound: A3       
+;  $11 - sound: A#3       
+;  $10 - sound: B3       
+;  $0F - sound: C4         
+
+               MUSIC_DATA          DB                  $16,$00,$00,$0F,$04,$00,$08,$10,$00 
+                                   DB                  $16,$00,$01,$10,$04,$00,$08,$10,$00 
+                                   DB                  $16,$00,$01,$11,$04,$00,$08,$10,$00 
+                                   DB                  $16,$00,$01,$12,$04,$00,$08,$10,$00 
+                                   DB                  $FF                           ; end of music
+                                   
+                                   END                                           

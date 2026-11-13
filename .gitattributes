@@ -1,0 +1,22 @@
+# Byte-pontos tárolás: a retro források CRLF sorvégei és bájtsorrendje ne változzon
+* -text
+
+# Bináris állományok: ne legyen szöveges diff / automatikus merge
+*.cas    binary
+*.bin    binary
+*.zx7    binary
+*.htpic  binary
+*.pt3    binary
+*.stmf   binary
+*.pdf    binary
+*.docx   binary
+
+# Nyelvi statisztika a GitHubon (a nem szabványos kiterjesztések felismerése)
+*.dt80asm linguist-language=Assembly
+*.tvcasm  linguist-language=Assembly
+*.inc     linguist-language=Assembly
+*.ras     linguist-language=Assembly
+*.tru     linguist-language=Assembly
+*.bas     linguist-language=BASIC
+*.xbas    linguist-language=BASIC
+*.diz     linguist-detectable=false

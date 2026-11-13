@@ -1,0 +1,5727 @@
+; memory map on page U0 below $	19EF
+;
+; $0100-$0740 not used character table
+; $0100		sinx tábla	256 bájt
+; $0200		siny tábla	256 bájt
+; $0300		star_buffer	200 bájt
+				
+	BULLET_DATA_ADDR	equ	$03C8			; 72	bájt
+	E_BULLET_DATA_ADDR	equ	$0410			; 72	bájt
+	AMMO_DATA_ADDR		equ	$0458			; 48 	bájt
+	DIGI_BIP_SOUND_ADDR	equ	$0488			; 257 	bájt
+	ENEMY_DATA_ADDR		equ	$0589			; 96 	bájt
+	EXPLOSION_SPRITE_ADDR	equ	$05E9			; 96	bájt
+				
+	MUSIC_DATA		equ	$C000
+				
+				org	6639			; TVC programok kezdőcíme
+                                ;{BASIC Header
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+				jp	MAIN			; <- 6659 ($1A03) memóriacím (a BASIC header ezt hívja meg a "10 PRINT USR(6659)" utasítással)
+				
+;******************************************************************
+; INTERRUPT HANDLER 
+; Execution time: 280 cycle 
+; Interrupt Frequency: ~ 8491.847826086956 Hz
+; CPU load by sound generator: ~ 77%
+;
+; EXX IX = channel 1 phase accumulator 
+; EXX IY = channel 2 phase accumulator 
+; EXX HL = channel 3 phase accumulator 
+;
+; EXX BC = local variable for calculation 
+; EXX DE = local variable for mixing
+;******************************************************************                                         
+	IT_HANDLER		ex	af,af'
+				exx
+				out	(7),a			;   	ack interrupt
+				
+; alter phase accumulator counter for channel 1
+	PAC1			ld	BC,$0000
+				add	IX,BC			; 	IX = IX + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 2
+	PAC2			ld	BC,$0000
+				add	IY,BC			; 	IY = IY + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 3
+	PAC3			ld	BC,$0000
+				add	HL,BC			; 	HL = HL + phase accumulator freq const
+				
+; set mixed value for channel 1 based on pac1 msb				
+				ld	C,80h
+				ld	A,IXH
+				cp	C			; 	check highest bit of PAC1
+				sbc	A,A
+	CH1_VOLUME		and	MASTER_VOLUME_CH1	; $1C for 2 ch, $14 for 3 ch (can be: $14,$10,$0C,$08,$04,$00)			
+				
+				ld	B,A			;     	STORE CH1
+				
+; set mixed value for channel 2 based on pac2 msb				
+				ld	A,IYH
+				cp	C			; 	check highest bit of PAC2
+				sbc	A,A
+	CH2_VOLUME		and	MASTER_VOLUME_CH2
+				add	A,B			; 	MIX CH1 + CH2
+				ld	B,A			;     	STORE CH1 + CH2         
+				
+; set mixed value for channel 3 based on pac3 msb				
+				ld	A,H
+				cp	C			; 	check highest bit of PAC3
+				sbc	A,A
+	CH3_VOLUME		and	MASTER_VOLUME_CH3
+				add	A,B			; 	MIX CH1 + CH2 + CH3
+				
+				and	60
+	GR_MODE			or	2			; 	must have 1 in 4 color graphics mode (2 for 16 color mode)
+				out	(6),A			;	write to sound port
+				
+	DURATION_COUNTER	ld	A,DURATION_IRQ_CONST	; 06h -> 1 ms, 55h -> 10 ms
+				dec	A
+				ld	(DURATION_COUNTER+1),A
+				jp	Z,MUSIC_PROCESSOR	; music processor is part of interrupt
+				
+				exx
+				ex	AF,af'
+				ei
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                                                      
+	MUSIC_PROCESSOR		ld	A,DURATION_IRQ_CONST	; reset duration counter (06h -> 1 ms, 55h -> 10 ms)
+				ld	(DURATION_COUNTER+1),A
+;--------------------------------------------------------------------------------------------------------------------------------------                                                                      
+				exx
+				ex	AF,af'
+				ei				; interrupt is enabled but not finished. running on (the next interrupt) is not a problem
+				push	AF			; running in the interrupt -> normal registers are need to be saved
+				push	BC
+				push	DE
+				push	HL
+				
+; Handling ADSR for channels (only volume release)				
+	CH1_VOL_RELEASE_CNT	ld	bc,ADSR_CH_01
+				dec	bc
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,CH2_VOL_RELEASE_CNT
+	CH1_VOL_RELEASE		ld	bc,ADSR_CH_01		; reset counter
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH1_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jp	c,CH2_VOL_RELEASE_CNT
+				ld	(CH1_VOLUME+1),a
+				
+	CH2_VOL_RELEASE_CNT	ld	bc,ADSR_CH_02
+				dec	bc
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,CH3_VOL_RELEASE_CNT
+	CH2_VOL_RELEASE		ld	bc,ADSR_CH_02		; reset counter
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH2_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jp	c,CH3_VOL_RELEASE_CNT
+				ld	(CH2_VOLUME+1),a
+				
+	CH3_VOL_RELEASE_CNT	ld	bc,ADSR_CH_03
+				dec	bc
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jp	nz,BPM_COUNTER
+	CH3_VOL_RELEASE		ld	bc,ADSR_CH_03		; reset counter
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH3_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jp	c,BPM_COUNTER
+				ld	(CH3_VOLUME+1),a
+				
+; process BPM counter				
+	BPM_COUNTER		ld	a,BPM_DIVIDER/BPM
+				dec	a
+				ld	(BPM_COUNTER+1),A
+				jp	NZ,END_INT
+				ld	A,BPM_DIVIDER/BPM	; reset BPM divider (IRQfreq/BPM_DIVIDER)/BPM
+				ld	(BPM_COUNTER+1),A
+				
+; parse record							
+	MUSICPOS		ld	HL,MUSIC_DATA-1
+				ld	d,MUS_TBL_HI		; high address of sound frequency constant lookup table
+	MP_CH1			inc	hl
+				ld	a,(hl)			; load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; first byte can be LOOP control
+				jp	nz,MP_SKIP
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; reset music data pointer
+				ld	(MUSICPOS+1),HL
+				jp	MP_CH1			; restart parsing
+				
+	MP_SKIP			cp	SKIP
+				jp	z,MP_CH2		; SKIP -> skip channel 1
+				cp	FRQINC00
+				jp	c,MP_CH1_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH1_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jp	MP_CH2
+	MP_CH1_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH1_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH1_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jp	MP_CH2
+	MP_CH1_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH1_NEXT3
+				;ld	(CH1_VOL_RELEASE+1),bc
+				jp	MP_CH1
+; handle normal musical note on CH1
+	MP_CH1_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; load frequ constant for CH1
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC1+1),BC		; put into CH1 freq constant in irq handler    
+				ld	a,MASTER_VOLUME_CH1	; new sound -> new volume
+				ld	(CH1_VOLUME+1),a
+				ld	bc,(CH1_VOL_RELEASE+1)
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH2			inc	hl
+				ld	a,(hl)
+; check control codes for channel 2
+				cp	SKIP
+				jp	z,MP_CH3		; SKIP -> skip channel 2
+				cp	FRQINC00
+				jp	c,MP_CH2_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH2_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jp	MP_CH3
+	MP_CH2_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH2_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH2_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jp	MP_CH3
+	MP_CH2_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH2_NEXT3
+				;ld	(CH2_VOL_RELEASE+1),bc
+				jp	MP_CH2
+; handle normal musical note on CH2
+	MP_CH2_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH2
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC2+1),BC		; put into CH2 freq constant in irq handler     
+	MOD_VOLUME2		ld	a,MASTER_VOLUME_CH2	; new sound -> new volume
+				ld	(CH2_VOLUME+1),a
+				ld	bc,(CH2_VOL_RELEASE+1)
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH3			inc	hl
+				ld	a,(hl)
+; check control codes for channel 3
+				cp	SKIP
+				jp	z,MP_END		; SKIP -> skip channel 3
+				cp	FRQINC00
+				jp	c,MP_CH3_NEXT1
+				cp	FRQINC0F + 1
+				jp	nc,MP_CH3_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jp	MP_END
+	MP_CH3_NEXT1		cp	FRQDEC00
+				jp	c,MP_CH3_NEXT2
+				cp	FRQDEC0F + 1
+				jp	nc,MP_CH3_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jp	MP_END
+	MP_CH3_NEXT2		call	CHECK_RELEASE_CONTROL
+				jp	nz,MP_CH3_NEXT3
+				;ld	(CH3_VOL_RELEASE+1),bc
+				jp	MP_CH3
+; handle normal musical note on CH3
+	MP_CH3_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH3
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC3+1),BC		; put into CH3 freq constant in irq handler    				
+	MOD_VOLUME3		ld	a,MASTER_VOLUME_CH3	; new sound -> new volume
+				ld	(CH3_VOLUME+1),a
+				ld	bc,(CH3_VOL_RELEASE+1)
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				
+	MP_END			ld	(MUSICPOS+1),HL
+	END_INT			pop	HL
+				pop	DE
+				pop	BC
+				pop	AF
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; check and set release control code
+; INPUT: 	A = control code to be look up
+; OUTPUT: 	BC = VOL RELEASE COUNTER if RELEASE00..RELEASE0F code is found
+; 		Z = 1 if found
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	CHECK_RELEASE_CONTROL	cp	ADSR00
+				jp	nz,MP_CH1_NEXT21
+				ld	bc,2			; ~ 7ms
+				ret
+	MP_CH1_NEXT21		cp	ADSR01
+				jp	nz,MP_CH1_NEXT22
+				ld	bc,7			; ~ 24ms
+				ret
+	MP_CH1_NEXT22		cp	ADSR02
+				jp	nz,MP_CH1_NEXT23
+				ld	bc,14			; ~ 49ms
+				ret
+	MP_CH1_NEXT23		cp	ADSR03
+				jp	nz,MP_CH1_NEXT24
+				ld	bc,21			; ~ 74ms
+				ret
+	MP_CH1_NEXT24		cp	ADSR04
+				jp	nz,MP_CH1_NEXT25
+				ld	bc,33			; ~ 116ms
+				ret
+	MP_CH1_NEXT25		cp	ADSR05
+				jp	nz,MP_CH1_NEXT26
+				ld	bc,48			; ~ 169ms
+				ret
+	MP_CH1_NEXT26		cp	ADSR06
+				jp	nz,MP_CH1_NEXT27
+				ld	bc,58			; ~ 204ms
+				ret
+	MP_CH1_NEXT27		cp	ADSR07
+				jp	nz,MP_CH1_NEXT28
+				ld	bc,68			; ~ 240ms
+				ret
+	MP_CH1_NEXT28		cp	ADSR08
+				jp	nz,MP_CH1_NEXT29
+				ld	bc,85			; ~ 300ms
+				ret
+	MP_CH1_NEXT29		cp	ADSR09
+				jp	nz,MP_CH1_NEXT2A
+				ld	bc,213			; ~ 752ms
+				ret
+	MP_CH1_NEXT2A		cp	ADSR0A
+				jp	nz,MP_CH1_NEXT2B
+				ld	bc,425			; ~ 1501ms
+				ret
+	MP_CH1_NEXT2B		cp	ADSR0B
+				jp	nz,MP_CH1_NEXT2C
+				ld	bc,680			; ~ 2402ms
+				ret
+	MP_CH1_NEXT2C		cp	ADSR0C
+				jp	nz,MP_CH1_NEXT2D
+				ld	bc,850			; ~ 3002ms
+				ret
+	MP_CH1_NEXT2D		cp	ADSR0D
+				jp	nz,MP_CH1_NEXT2E
+				ld	bc,2548			; ~ 9001ms
+				ret
+	MP_CH1_NEXT2E		cp	ADSR0E
+				jp	nz,MP_CH1_NEXT2F
+				ld	bc,4246			; ~ 15000ms
+				ret
+	MP_CH1_NEXT2F		cp	ADSR0F
+				ret	nz
+				ld	bc,6794			; ~ 24001ms
+				ret
+				
+;******************************************************************
+; INIT MUSIC MIXER INTERRUPT HANDLER
+;******************************************************************
+	IT_HANDLER_1		db	00h
+	IT_HANDLER_2		dw	0000h
+				
+	START_MUSIC_MIXER	di
+				ld	A,BPM_DIVIDER/BPM
+				ld	(BPM_COUNTER+1),A
+				ld	A,DURATION_IRQ_CONST
+				ld	(DURATION_COUNTER+1),A
+				ld	HL,MUSIC_DATA-1		; -1 is needed because parsing is started with inc hl
+				ld	(MUSICPOS+1),HL
+				ld	(MUSIC_RESTART+1),HL
+				ld	A,10			; disable CRTC CURSOR IT
+				out	(112),A
+				ld	A,35
+				out	(113),A
+				ld	A,$E9			; Sound IT counter divider LO
+				out	(4),A			; (4096 - 23 = 4073 = $0FE9)
+				ld	A,32+$0F		; Sound IT enabled, sound is OFF + divider HI
+				out	(5),A			; IT frequency = Fsys / 16 / 23 = ~ 8491 Hz
+				ld	A,(0038h)		; SAVE IT HANDLER
+				ld	(IT_HANDLER_1),A
+				ld	HL,(0039h)
+				ld	(IT_HANDLER_2),HL
+				ld	A,0C3h			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038h),A
+				ld	HL,IT_HANDLER
+				ld	(0039H),HL
+				ei				; enable interrupt
+				ret
+				
+;******************************************************************
+; RESTORE INTERRUPT HANDLER
+;******************************************************************
+	STOP_MUSIC_MIXER	di
+				ld	A,10			; restore the original interrupt
+				out	(112),A
+				ld	A,3
+				out	(113),A			; CURSOR IT enabled
+				xor	A
+				out	(4),A
+				out	(5),A			; Sound IT disabled, Sound is OFF
+				ld	A,(IT_HANDLER_1)	; RESTORE IT HANDLER
+				ld	(0038h),A
+				ld	HL,(IT_HANDLER_2)
+				ld	(0039h),HL
+				ld	hl,0
+				ld	(PAC1+1),hl
+				ld	(PAC2+1),hl
+				ld	(PAC3+1),hl
+				ret
+				
+				
+	MUS_TBL_HI		equ	$1D
+				org	$1D00
+; Freq divider table for musical sounds 5008Hz IRQ
+	SOUND_TABLE		dw	0			; 0.00 Hz
+				dw	252			; 32.7 Hz
+				dw	267			; 34.65 Hz
+				dw	283			; 36.71 Hz
+				dw	300			; 38.89 Hz
+				dw	318			; 41.2 Hz
+				dw	337			; 43.65 Hz
+				dw	357			; 46.25 Hz
+				dw	378			; 49 Hz
+				dw	401			; 51.91 Hz
+				dw	424			; 55 Hz
+				dw	450			; 58.27 Hz
+				dw	476			; 61.74 Hz
+				dw	505			; 65.41 Hz
+				dw	535			; 69.3 Hz
+				dw	567			; 73.42 Hz
+				dw	600			; 77.78 Hz
+				dw	636			; 82.41 Hz
+				dw	674			; 87.31 Hz
+				dw	714			; 92.5 Hz
+				dw	756			; 98 Hz
+				dw	801			; 103.83 Hz
+				dw	849			; 110 Hz
+				dw	899			; 116.54 Hz
+				dw	953			; 123.47 Hz
+				dw	1010			; 130.81 Hz
+				dw	1070			; 138.59 Hz
+				dw	1133			; 146.83 Hz
+				dw	1201			; 155.56 Hz
+				dw	1272			; 164.81 Hz
+				dw	1348			; 174.61 Hz
+				dw	1428			; 185 Hz
+				dw	1513			; 196 Hz
+				dw	1603			; 207.65 Hz
+				dw	1698			; 220 Hz
+				dw	1799			; 233.08 Hz
+				dw	1906			; 246.94 Hz
+				dw	2019			; 261.63 Hz
+				dw	2139			; 277.18 Hz
+				dw	2266			; 293.66 Hz
+				dw	2401			; 311.13 Hz
+				dw	2544			; 329.63 Hz
+				dw	2695			; 349.23 Hz
+				dw	2855			; 369.99 Hz
+				dw	3025			; 392 Hz
+				dw	3205			; 415.3 Hz
+				dw	3396			; 440 Hz
+				dw	3598			; 466.16 Hz
+				dw	3812			; 493.88 Hz
+				dw	4038			; 523.25 Hz
+				dw	4278			; 554.37 Hz
+				dw	4533			; 587.33 Hz
+				dw	4802			; 622.25 Hz
+				dw	5088			; 659.25 Hz
+				dw	5390			; 698.46 Hz
+				dw	5711			; 739.99 Hz
+				dw	6050			; 783.99 Hz
+				dw	6410			; 830.61 Hz
+				dw	6791			; 880 Hz
+				dw	7195			; 932.33 Hz
+				dw	7623			; 987.77 Hz
+				dw	8076			; 1046.5 Hz
+				dw	8557			; 1108.73 Hz
+				dw	9065			; 1174.66 Hz
+				dw	9605			; 1244.51 Hz
+				dw	10176			; 1318.51 Hz
+				dw	10781			; 1396.91 Hz
+				dw	11422			; 1479.98 Hz
+				dw	12101			; 1567.98 Hz
+				dw	12820			; 1661.22 Hz
+				dw	13583			; 1760 Hz
+				dw	14391			; 1864.66 Hz
+				dw	15246			; 1975.53 Hz
+				dw	16153			; 2093 Hz
+				dw	17113			; 2217.46 Hz
+				dw	18131			; 2349.32 Hz
+				dw	19209			; 2489.02 Hz
+				dw	20351			; 2637.02 Hz
+				dw	21561			; 2793.83 Hz
+				dw	22844			; 2959.96 Hz
+				dw	24202			; 3135.96 Hz
+				dw	25641			; 3322.44 Hz
+				dw	27166			; 3520 Hz
+				dw	28781			; 3729.31 Hz
+				dw	30492			; 3951.07 Hz
+				dw	32306			; 4186.01 Hz
+				dw	0			; 0 Hz
+				
+;******************************************************************
+; MAIN PROGRAM
+;******************************************************************
+; developer could set this constants
+				
+	BPM			equ	520			; <- set the Beat per Minutes (BPM) HERE (default: 884)
+				
+	MASTER_VOLUME_CH1	equ	$14			; can be: $14,$10,$0C,$08,$04,$00			
+	MASTER_VOLUME_CH2	equ	$0C			; can be: $14,$10,$0C,$08,$04,$00			
+	MASTER_VOLUME_CH3	equ	$10			; can be: $14,$10,$0C,$08,$04,$00
+				
+	ADSR_CH_01		equ	$16
+	ADSR_CH_02		equ	$0
+	ADSR_CH_03		equ	$16
+	ADSR_CH_03_2		equ	$150
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   		
+	DURATION_IRQ_CONST	equ	6
+	BPM_DIVIDER		equ	8491/DURATION_IRQ_CONST*10
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; CRTC routines
+				
+	CRTC_DISABLE		ld	A,1			; CRTC disable screen
+				out	(112),A
+				ld	A,0
+				out	(113),A
+				ret
+				
+	CRTC_ENABLE		ld	A,1			; CRTC enable screen
+				out	(112),A
+				ld	A,64
+				out	(113),A
+				ret
+				
+; Clear Screen (fill entire screen with 0)
+				
+	CLS			ld	hl,$8000
+				ld	bc,$3FFF
+				ld	d,0
+	cls_loop		ld	(hl),d
+				inc	hl
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,cls_loop
+				ret
+				
+				org	$1e00
+	data			incbin	"smooth_data.bin"
+	siny			equ	$0100
+	sinx			equ	$0200
+				org	$1F00
+				
+	sin:			db	$3f, $40, $42, $43, $45, $46, $48, $49
+				db	$4b, $4c, $4e, $4f, $51, $52, $54, $55
+				db	$57, $58, $59, $5b, $5c, $5e, $5f, $60
+				db	$62, $63, $64, $65, $66, $68, $69, $6a
+				db	$6b, $6c, $6d, $6e, $6f, $70, $71, $72
+				db	$73, $74, $75, $75, $76, $77, $77, $78
+				db	$79, $79, $7a, $7a, $7b, $7b, $7c, $7c
+				db	$7c, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7e, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7c, $7c, $7c, $7b, $7b, $7a, $7a, $79
+				db	$79, $78, $77, $77, $76, $75, $75, $74
+				db	$73, $72, $71, $70, $6f, $6e, $6d, $6c
+				db	$6b, $6a, $69, $68, $66, $65, $64, $63
+				db	$62, $60, $5f, $5e, $5c, $5b, $59, $58
+				db	$57, $55, $54, $52, $51, $4f, $4e, $4c
+				db	$4b, $49, $48, $46, $45, $43, $42, $40
+				db	$3f, $3d, $3b, $3a, $38, $37, $35, $34
+				db	$32, $31, $2f, $2e, $2c, $2b, $29, $28
+				db	$26, $25, $24, $22, $21, $1f, $1e, $1d
+				db	$1b, $1a, $19, $18, $17, $15, $14, $13
+				db	$12, $11, $10, $0f, $0e, $0d, $0c, $0b
+				db	$0a, $09, $08, $08, $07, $06, $06, $05
+				db	$04, $04, $03, $03, $02, $02, $01, $01
+				db	$01, $00, $00, $00, $00, $00, $00, $00
+				db	$00, $00, $00, $00, $00, $00, $00, $00
+				db	$01, $01, $01, $02, $02, $03, $03, $04
+				db	$04, $05, $06, $06, $07, $08, $08, $09
+				db	$0a, $0b, $0c, $0d, $0e, $0f, $10, $11
+				db	$12, $13, $14, $15, $17, $18, $19, $1a
+				db	$1b, $1d, $1e, $1f, $21, $22, $24, $25
+				db	$26, $28, $29, $2b, $2c, $2e, $2f, $31
+				db	$32, $34, $35, $37, $38, $3a, $3b, $3d
+				
+;---------------------------------------------------------------------------------------------
+; COLOR CHANGER + SOUND EFFECTS - IT HANDLER
+;---------------------------------------------------------------------------------------------
+	COLOR_POS		db	0			; 0-IRQ1, 1-IRQ2, 2-IRQ3
+	SOUND_FX_TYPE		db	0			; 0 - SPACE SHIP BASE SOUND
+								; 1 - 255 sound counter of SHOOTS
+	ENEMY_FX_TYPE		db	248			; 0 - SPACE SHIP BASE SOUND
+								; 248 sound counter of enemy SHOOTS
+	EXPLOSION_FX_TYPE	db	15			; 15 - no sound, 60 - downcounter
+				
+	COLOR_IT_HANDLER	push	af
+				ld	a,(COLOR_POS)
+				cp	1
+				jp	z,IRQ2
+				cp	2
+				jp	z,IRQ3
+; COLOR PALETTE 1			
+	IRQ1:			inc	a			; alter COLOR POS
+				ld	(COLOR_POS),a
+				ld	A,$00			; fekete
+				out	($60),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$15			; szürke       
+				out	($63),A
+				ld	a,14			; R14 =
+				out	($70),a
+				ld	a,1			; 1. karaktersor
+				out	($71),a
+				ld	a,14			; R14 = 0
+				out	($70),a
+				ld	a,0
+				out	($71),a
+				
+	ALTERNATOR:		ld	a,1
+				xor	1
+				ld	(ALTERNATOR+1),a
+				jp	nz,CHK_ENEMY_SND
+				
+	CHK_SND:		ld	a,(SOUND_FX_TYPE)	; check the type of sound effect
+				or	a
+				jp	z,DOUBLE_CHECK
+				dec	a
+				ld	(SOUND_FX_TYPE),a
+				out	($04),a
+				or	16			; sound is enabled + pitch high bit
+				and	$DF			; sound IT is disabled
+				out	($05),a
+				ld	a,32 + 1		; graphics 4, sound volume 8
+				out	($06),a
+				
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+				
+	CHK_ENEMY_SND:		ld	a,(ENEMY_FX_TYPE)	; check the type of enemy sound effect
+				cp	248
+				jp	z,CHK_SND
+				dec	a
+				ld	(ENEMY_FX_TYPE),a
+				out	($04),a
+				or	16			; sound is enabled + pitch high bit
+				and	$DF			; sound IT is disabled
+				out	($05),a
+				ld	a,32 + 1		; graphics 4, sound volume 8
+				out	($06),a
+				
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+	DOUBLE_CHECK:		ld	a,(ENEMY_FX_TYPE)	; check the type of enemy sound effect
+				cp	248
+				jp	z,NO_SFX
+				dec	a
+				ld	(ENEMY_FX_TYPE),a
+				out	($04),a
+				or	16			; sound is enabled + pitch high bit
+				and	$DF			; sound IT is disabled
+				out	($05),a
+				ld	a,32 + 1		; graphics 4, sound volume 8
+				out	($06),a
+				
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+				
+; SPACE SHIP BASE SOUND
+	NO_SFX:			push	hl
+	soundCnt1:		ld	hl,$8000		; keep hl in $8000-$BFFF
+				inc	hl
+				res	6,h
+				ld	(soundCnt1+1),hl
+				ld	a,16 + 1		; sound is enabled + pitch high bit
+				out	($05),a
+				ld	a,(hl)
+				out	($04),a			; generate space ship background noise caused by plasma
+				ld	a,4 + 1			; graphics 4 + sound volume 1
+				out	($06),a
+				pop	hl
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+;--------------------------------------
+; plasma planet
+;--------------------------------------				
+	IRQ2:			inc	a			; alter COLOR POS
+				ld	(COLOR_POS),a
+	plasma_temp1		ld	A,$00			; 00 fekete / 04 sötétvörös
+				out	($60),A
+	plasma_temp2		ld	A,$44			; piros $44 
+				out	($62),A
+	plasma_temp3		ld	A,$54			; sárga $54
+				out	($63),A
+				ld	a,14			; R14 = 9
+				out	($70),a
+				ld	a,9
+				out	($71),a
+				
+				ld	a,(EXPLOSION_FX_TYPE)	; check the type of sound effect
+				cp	15
+				jp	z,IRQ2_END
+				dec	a
+				ld	(EXPLOSION_FX_TYPE),a
+				
+				and	60			; decremented volume of explosion			
+				or	1
+				out	($06),a
+				
+				ld	a,r			; random number for explsoion sound pitch
+				out	($04),a
+				or	16			; sound is enabled + pitch high bit
+				and	$17			; sound IT is disabled
+				out	($05),a
+				
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+	IRQ2_END:		xor	a			; border is BLACK again
+				out	(0),a
+				pop	af
+				out	(7),A
+				ei
+				ret
+				
+;--------------------------------------
+; space ship bottom
+;--------------------------------------				
+	IRQ3:			
+				xor	a			; alter COLOR POS
+				ld	(COLOR_POS),a
+				ld	A,$00			; fekete
+				out	($60),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$45			; lila       
+				out	($63),A
+				ld	a,14			; R14 = 14
+				out	($70),a
+				ld	a,14
+				out	($71),a
+				
+				ld	a,1			; graphics 4, sound volume 0
+				out	($06),a
+				
+				pop	af
+	NOIRQ:			out	(7),A
+				ei
+				ret
+				
+;---------------------------------------------------------------------------------------------
+; INIT COLOR IT
+;---------------------------------------------------------------------------------------------
+	INIT_COLOR_IT		di
+				ld	A,0C3h			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038h),A
+				ld	HL,COLOR_IT_HANDLER
+				ld	(0039H),HL
+				ei				; enable interrupt
+				ret
+;---------------------------------------------------------------------------------------------
+; INIT DO NOTHING IT
+;---------------------------------------------------------------------------------------------
+	INIT_NO_IRQ		di
+				ld	A,0C3h			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038h),A
+				ld	HL,NOIRQ
+				ld	(0039H),HL
+				ei				; enable interrupt
+				ret
+;---------------------------------------------------------------------------------------------
+; MAIN
+;---------------------------------------------------------------------------------------------	
+	TENMINUTE		equ	30000
+				
+	zoomOUTflag		db	0			; 1=zoom out intro
+	zoomOutCnt		db	30
+	reward_flag		db	0			; 1= zoom out outro before reward
+	tenminutecounter	dw	TENMINUTE		; 10 perces számláló (10* 50*60)
+				
+	MAIN			di				; IT disabled
+				exx				; save registers
+				push	HL
+				push	BC
+				push	DE
+				exx
+				push	IX
+				push	IY
+				
+;===============================				
+; GRAPHICS ELŐKÉSZÍTÉS				
+;===============================	
+; set border 						
+				xor	a
+				out	(0),A			; keret színe fekete
+; set palette				
+				ld	A,$00			; fekete       
+				out	($60),A
+				ld	A,$55			; fehér         
+				out	($61),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$01			; sötétkék       
+				out	($63),A
+				
+				call	rezonance_LOGO
+				
+				ld	A,$45			; lila       
+				out	($63),A
+				
+;===============================				
+; INTRO TEXT SCENE			
+;===============================
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,DIGI_BIP		; decompress digi bip sound for pick up ammo
+				ld	de,DIGI_BIP_SOUND_ADDR	; special memory area
+				call	ZX7_DECOMPRESS
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				call	star_init		; inti star animation
+				
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				call	CLS
+				ld	hl,PIC_TITLE_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				ld	b,100
+	star_init_loop:		push	bc
+				call	star_update		; animate stars				
+				pop	bc
+				djnz	star_init_loop
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,DIGI_START		; prepare DIGI SOUND
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				ld	hl,MUSIC_DATA
+				ld	de,6042
+				ld	c,2			; graphics 16
+				di
+				call	PLAY_DIGI_SOUND		; PLAY DIGI SOUND		
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,MUSIC_DATA_ZX7	; decompress music
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR and MUSIC PLAYER INTERRUPT
+				
+	wt1:			ld	b,100
+	wt11:			halt
+				djnz	wt11
+				
+				call	star_update		; animate stars
+				
+				ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$E5
+				jp	nz,msc_frame_cnt
+				ld	a,(MUSICPOS+1)
+				cp	$80
+				jp	c,msc_frame_cnt
+				
+				ld	bc,ADSR_CH_03
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$10
+				ld	(CH3_VOLUME+1),a
+				ld	hl,10000
+				ld	(msc_frame_cnt+1),hl
+				ld	HL,MUSIC_DATA-1		; RESTART music
+				ld	(MUSICPOS+1),HL
+				
+	msc_frame_cnt:		ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$D2
+				jp	nz,key_check
+				ld	a,(MUSICPOS+1)
+				cp	$40
+				jp	c,key_check
+				ld	bc,ADSR_CH_03_2
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH3_VOLUME+1),a
+				
+	key_check:		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	z,wt_over
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,wt1
+				
+	wt_over:		call	STOP_MUSIC_MIXER
+				
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				call	CLS
+				
+; CREDITS	
+				di
+				ld	a,1
+				out	(6),a
+				ld	(GR_MODE+1),a
+				
+				xor	a
+				out	($60),A
+				out	($61),A
+				out	($62),A
+				out	($63),A
+				
+				call	LOAD_CREDIT_MUSIC
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	hl,TITLE_PIC_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	COPYRIGHT_TEXT
+				call	CRTC_ENABLE
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR and MUSIC PLAYER INTERRUPT
+				
+				halt
+				
+	full_restart:		xor	a			; fekete
+				out	($60),A
+				ld	A,$55			; fehér
+				out	($61),A
+				ld	A,$45			; lila
+				out	($62),A
+				ld	A,$54			; sárga       
+				out	($63),A
+				
+				ld	a,$00			; normal color		
+				ld	(color_and_value_1),a
+				ld	(color_and_value_1+1),a
+				ld	(color_and_value_1+2),a
+				ld	(color_and_value_1+3),a
+				ld	(color_and_value_2),a
+				ld	(color_and_value_2+1),a
+				ld	(color_and_value_2+2),a
+				ld	(color_and_value_2+3),a
+				ld	BC,$0107		; 1. oszlop, 8. sor
+				call	RST30DB3
+				ld	DE,intro_szoveg		;szöveg címe
+				call	RST30DB2
+				ld	BC,$0108
+				call	RST30DB3
+				ld	DE,intro_szoveg + 33
+				call	RST30DB2
+				ld	BC,$0109
+				call	RST30DB3
+				ld	DE,intro_szoveg + 2*33
+				call	RST30DB2
+				ld	BC,$010A
+				call	RST30DB3
+				ld	DE,intro_szoveg + 3*33
+				call	RST30DB2
+				ld	BC,$010B
+				call	RST30DB3
+				ld	DE,intro_szoveg + 4*33
+				call	RST30DB2
+				ld	BC,$010C
+				call	RST30DB3
+				ld	DE,intro_szoveg + 5*33
+				call	RST30DB2
+				ld	BC,$010D
+				call	RST30DB3
+				ld	DE,intro_szoveg + 6*33
+				call	RST30DB2
+				ld	BC,$010E
+				call	RST30DB3
+				ld	DE,intro_szoveg + 7*33
+				call	RST30DB2
+				ld	BC,$010F
+				call	RST30DB3
+				ld	DE,intro_szoveg + 8*33
+				call	RST30DB2
+				
+				ld	BC,$0110
+				call	RST30DB3
+				ld	DE,intro_szoveg + 9*33
+				call	RST30DB2
+				ld	BC,$0111
+				call	RST30DB3
+				ld	DE,intro_szoveg + 10*33
+				call	RST30DB2
+				ld	BC,$0112
+				call	RST30DB3
+				ld	DE,intro_szoveg + 11*33
+				call	RST30DB2
+				ld	BC,$0113
+				call	RST30DB3
+				ld	DE,intro_szoveg + 12*33
+				call	RST30DB2
+				
+	wt2:			halt
+				call	e_animate_logo
+				
+				ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$E5
+				jp	nz,credit_chk_key
+				ld	a,(MUSICPOS+1)
+				cp	$A0
+				jp	c,credit_chk_key
+				
+				ld	HL,MUSIC_DATA-1		; RESTART music
+				ld	(MUSICPOS+1),HL
+				
+	credit_chk_key:		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	z,wt2_over
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,wt2
+				
+	wt2_over:		call	STOP_MUSIC_MIXER
+				
+				call	CRTC_DISABLE
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+; INIT GAME
+				ld	hl,SHIP_ZX7		; decompress SHIP view
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,DIGI_WARNING		; prepare DIGI SOUND - WARNING
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				
+; decompress explosion sprite
+				ld	hl,EXPLOSION_SPRITE_ZX7
+				ld	de,EXPLOSION_SPRITE_ADDR
+				call	ZX7_DECOMPRESS
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				ld	A,$00			; fekete
+				out	($60),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$45			; lila       
+				out	($63),A
+				
+				call	RENDER_CROSSHAIR
+				call	RENDER_RADAR_CENTER
+				call	update_shield
+				
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				ld	hl,MUSIC_DATA
+				ld	de,6410
+				ld	c,1			; graphics 4
+				di
+				call	PLAY_DIGI_SOUND		; PLAY DIGI SOUND						
+				
+; INIT VARIABLES
+				ld	a,INIT_SHIELD_VALUE
+				ld	(shield),a
+				ld	a,INIT_AMMO_VALUE
+				ld	(ammo),a
+				xor	a
+				ld	(old_shield),a
+				ld	(old_ammo),a
+				call	init_score
+				
+				xor	a			; init scoreStr zo one character length to display the number of remaining enemies
+				ld	(scoreSTR+1),a
+				ld	a,TOTAL_ENEMIES		; display number of enemies
+				call	display_num_enemy
+				
+				xor	a			; clear reward flag
+				ld	(reward_flag),a
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				
+; INIT SUPERCOLOR IT SYSTEM
+				call	INIT_COLOR_IT
+				call	InitBullets
+				call	e_init_enemies
+				call	e_bullet_system_init
+				call	a_init_ammo
+; init zoom out intro
+				ld	hl,1
+				ld	(base_zoom),hl
+				ld	a,1
+				ld	(zoomOUTflag),a		; intro started
+				ld	a,INIT_BASE_ZOOM
+				ld	(zoomOutCnt),a
+				
+				jp	MAIN_GAME
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	END_OF_GAME						; never reached
+				pop	IY			; restore registers
+				pop	IX
+				exx
+				pop	DE
+				pop	BC
+				pop	HL
+				exx
+				ei
+				ret				; end of game
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	LOAD_CREDIT_MUSIC:	
+				ld	bc,40			; setup parameters for CREDITS MUSIC
+				ld	(CH1_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH2_VOL_RELEASE+1),bc
+				ld	bc,20
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH1_VOLUME+1),a
+				ld	a,$12
+				ld	(CH2_VOLUME+1),a
+				ld	a,$04
+				ld	(CH3_VOLUME+1),a
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,MUSIC2_DATA_ZX7
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------				
+	COPYRIGHT_TEXT:		
+				ld	a,$07			; extra color
+				ld	(color_and_value_1),a
+				ld	(color_and_value_1+1),a
+				ld	(color_and_value_1+2),a
+				ld	(color_and_value_1+3),a
+				ld	(color_and_value_2),a
+				ld	(color_and_value_2+1),a
+				ld	(color_and_value_2+2),a
+				ld	(color_and_value_2+3),a
+				ld	BC,$0115
+				call	RST30DB3
+				ld	DE,intro_szoveg + 13*33
+				call	RST30DB2
+				ld	BC,$0116
+				call	RST30DB3
+				ld	DE,intro_szoveg + 14*33
+				call	RST30DB2
+				ld	BC,$0117
+				call	RST30DB3
+				ld	DE,intro_szoveg + 15*33
+				call	RST30DB2
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; DIGI SOUND PLAYER
+; input: DE - length in bytes
+; input: HL - start pointer
+; input: C - video mode: 1 4 color, 2 - 16 color
+;--------------------------------------------------------------------------------------------------------------------------------------  
+	DIGI_DELAY		equ	25
+				
+	PLAY_DIGI_SOUND:	xor	a
+				out	(4),a
+				out	(5),a
+				
+	PLAY			ld	A,(HL)			; A regiszterben az aktuális digi hang
+; felső 4 bit lejátszása
+				srl	A			; jobbra eltoljuk A regiszter bitjeit kétszer,
+				srl	A			; így a felső 4 bit kerül az 5-2. bitekre
+				and	60			; alsó-felső 2 bitet nullázzuk
+				ld	B,A			; B regiszterbe elmentjük A regiszter értékét
+				ld	A,C			; A regiszterben a grafikus mód
+				or	B			; "rákeverjük" a digi hangot a 2-5. bitekre
+				out	(6),A			; kiküldjük az amplitúdó értéket a 6-os portra
+; szünetet tartunk (DIGI_DELAY-t a frekvenciához kell állítani)
+	DD1:			ld	B,DIGI_DELAY		; a szünet hossza
+	DELAY_1			djnz	DELAY_1			; önmagára ugró ciklus a szünet hosszáig
+; alsó 4 bit lejátszása
+				jp	pl1			; just for balanced timing 30 Tcycle
+	pl1			jp	pl2
+	pl2			jp	pl3
+	pl3			
+				
+				ld	A,(HL)			; A regiszterben a digi hang aktuális byte-ja
+				sla	A			; balra eltoljuk A regiszter bitjeit kétszer,
+				sla	A			; így az alsó 4 bit kerül az 5-2. bitekre
+				and	60			; alsó-felső 2 bitet nullázzuk
+				ld	B,A			; B regiszterbe elmentjük A regiszter értékét
+				ld	A,C			; A regiszterben a grafikus mód
+				or	B			; "rákeverjük" a digi hangot a 2-5. bitekre
+				out	(6),A			; kiküldjük az amplitúdó értéket a 6-os portra
+; mintavételezésnek megfelelő szünetet tartunk ismét
+	DD2:			ld	B,DIGI_DELAY		; a szünet hossza
+	DELAY_2			djnz	DELAY_2			; önmagára ugró ciklus a szünet hosszáig
+; ciklus vége 30 Tcycle
+				inc	HL			; HL a következő lejátszandó byte-ra mutat
+				dec	DE			; csökkentjük a hátralevő byte-ok számát
+				ld	A,D			; ellenőrizzük, hogy
+				or	E			; nulla-e
+				jp	NZ,PLAY			; ha nem, akkor ugrás a lejátszó ciklus elejére
+				
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------                                   				
+				
+	intro_szoveg:		
+				db	"A PLAZMABOLYGÓN  12 ŰRHAJÓ ELLEN", 0
+				db	"HARCOLSZ. A FELSZÍNHEZ KÖZELÍTVE", 0
+				db	"A PIROS-SÁRGA PLAZMA GYENGÍTI A ", 0
+				db	"PAJZSOD. TÁVOLODVA A KÉK ZÓNÁBAN", 0
+				db	"VISSZAHŰTHETED. A FELSŐ MŰSZEREK", 0
+				db	"A PAJZS ÉS MUNÍCIÓ ÁLLAPOTÁT MU-", 0
+				db	"TATJÁK. ALUL A MÉG ÉLŐ ELLENFEL-", 0
+				db	"EK SZÁMÁT JELZI. CSAK AKKOR LŐJJ", 0
+				db	"HA  MÁR TELJESEN MEGKÖZELÍTETTED", 0
+				db	"ŐKET.  IRÁNYÍTÁS-JOY,  TŰZ-SPACE", 0
+				db	"MUNÍCIÓ BEGYŰJTÉS A KÉK ZÓNÁBAN-", 0
+				db	"CTRL GOMB,  MOZGÁS  ELŐRE-HÁTRA-", 0
+				db	"Q ÉS A GOMBOKKAL,  KILÉPÉS - ESC", 0
+				
+				
+				db	"   (c) 2026 by Fast and Force   ",0
+				db	"     original SID  music by     ", 0
+				db	"     Michal Brzeski (Michu)     ",0
+				
+	gratu_szoveg:		db	"      GRATULÁLOK KAPITÁNY!      ",0
+				db	"     PONTSZÁMOD -               ",0
+				db	"    OROSZOLIVÉR - 006000000     ",0; Idea of two screen in one concept
+				db	"DOBERDOBROTHERS - 005000000     ",0; DevTool + multicolor IRQ idea
+				db	"       BERYSOFT - 004000000     ",0; Digi Sound Converter and Player + character set
+				db	"           GECO - 003000000     ",0; A lot of help in the development of SID player
+				db	"       ANYSTONE - 002000000     ",0; testing
+				db	"        KKS2003 - 001000000     ",0; testing
+				
+;******************************************************************
+; Draw characters
+; precondition: VID page is at $8000 
+;******************************************************************	
+	SCREEN_WIDTH		equ	64			; képernyő szélessége bájtokban
+	SCREEN_HEIGHT		equ	240
+	END_OF_TEXT		equ	255			; ez a kód jelzi a szöveg végét
+	CHAR_SET_IMAGE_WIDTH	equ	192			; karakterkészlet image szélessége bájtokban
+	CHAR_SET_IMAGE_HEIGHT	equ	10			; karakterkészlet image magassága pixelekben			
+				
+	CHAR_HEIGHT		db	0
+	VRAM_POSITION		dw	$8000
+				
+	RST30DB3		dec	b			; can be called replacing rst $30 with db $3
+				sla	b			; x2 for 4 color mode
+				dec	c			; see TVC ROM manual page 176
+				ld	a,c
+				add	a,a
+				add	a,a
+				add	a,c
+				add	a,a
+				ld	h,a
+				xor	a
+				srl	h
+				rra
+				scf
+				rr	h
+				rra
+				or	b
+				ld	l,a			; HL = $8000 + (sor * 10) * 64 + oszlop
+				ld	(VRAM_POSITION),hl
+				ret
+				
+	RST30DB2		ld	(WRITE_TEXT+1),de	; can be called replacing rst $30 with db $2
+				ld	de,(VRAM_POSITION)
+				
+				;{ ---------- WRITE_TEXT
+				; from TVC lemezújság tech demo - (c) Bertók Zsolt, BerySoft - 2023
+                              	; szöveg kiírása saját karakterkészlettel
+                              	; paraméterek: 	DE -> képernyő (VRAM) pozíció; 
+				; 		(WRITE_TEXT+1) <- a szöveg címe
+				; hasznája AF, BC, DE, HL
+	WRITE_TEXT		ld	A,(0)			; A = a szöveg karaktere
+				or	A			; A == 0?
+				ret	z			; Ha A = 0, akkor ez a sor vége, visszatérünk a hívóhoz
+				cp	END_OF_TEXT		; A = END_OF_TEXT?
+				ret	z			; Ha A = END_OF_TEXT, akkor ez a szöveg vége, visszatérünk a hívóhoz
+				ld	HL,CHAR_SET		; HL -> CHAR_SET image
+				;{ karakter típusának elemzése
+				cp	32			; a karakter alacsonyabb kódú, mint a szóköz?
+				jp	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki
+				cp	58			; kisebb, mint a 9 utáni karakter?
+				jp	c,WRITE_TEXT_SPACE_TO_9	; ha igen, akkor szóköztől és 9 közötti karakter
+				cp	"["			; Z vagy kisebb karakter
+				jp	c,WRITE_TEXT_A_Z	; ha igen, akkor kiírjuk
+				cp	123			; kisebb, mint a "z" utáni karakter?
+				jp	c,WRITE_TEXT_SMALL_A_Z	; ha igen, akkor kiírjuk
+				cp	144			; 144 az "á" betű kódja
+				jp	nc,WT_SMALL_ACCENTED_A_Z; ha A >= 144, akkor ugrás a kis ékezetes betűk kiírására
+				;}
+                              	;{ nagy ékezetes karakterek - Á,É,Í,Ó,Ö,Ő,Ú,Ü,Ű				
+				cp	137			; 137 az "Ű" betű utáni karakter kódja
+				jp	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 137, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26)*2	; a SPACE-"/","0"-"9","A"-"Z","a"-"z" karaktereket átlépjük
+				add	HL,BC			; HL az "Á" betű képdarabjára mutat			
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (nagy ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	128			; a kiírandó karakter kódjából kivonjuk az "Á" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "Á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben     
+				;}
+				;{ kis ékezetes karakterek - á,é,í,ó,ö,ő,ú,ü,ű
+	WT_SMALL_ACCENTED_A_Z	cp	153			; 153 az "ű" betű utáni karakter kódja
+				jp	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 153, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26+9)*2	; a SPACE-'/","0"-"9","A"-"Z","a"-"z","Á"-"Ű" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (kis ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	144			; a kiírandó karakter kódjából kivonjuk az "á" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben
+				;}
+				;{ SPACE-"/" + "0"-"9"
+	WRITE_TEXT_SPACE_TO_9	push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (szóköztől a nagy "9"-ig az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	32			; a kiírandó karakter kódjából kivonjuk a szóköz kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}				
+				;{ A-Z-ig karakterek
+	WRITE_TEXT_A_Z		cp	"A"			; "A" betűnél kisebb kód?
+				jp	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10)*2		; a SPACE-'/","0"-"9" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"A"			; a kiírandó karakter kódjából kivonjuk az "A" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "A" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}
+				;{ kis a-z karakterek
+	WRITE_TEXT_SMALL_A_Z	ld	BC,(16+10+26)*2		; a SPACE-"/","0"-"9","A"-"Z" karaktereket átlépjük
+				add	HL,BC			; HL -> "a"
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT	; ennyi pixel magas egy karakter (p, q, y teljesen leér a 10. sorig)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"a"			; a kiírandó karakter kódjából kivonjuk az "a" kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására				
+				;}
+				;{ a karakter kezdőcímének kiszámolása a karakterkészlet image-ben
+	WT_SET_CHAR_ADDR	add	A,A			; A = A * 2 -> 1 karakter 2 byte
+				ld	C,A
+				ld	B,0			; BC = A * 2
+				add	HL,BC			; HL a karakter első sorának első byte-jára mutat a karakterkészlet image-ben
+				;}
+                              	;{ egy karakter kiírása (DE: képernyő (VRAM) pozíció; HL: karakter image cím; C: karakter magasság pixelben)
+	WRITE_TEXT_CHAR		push	DE			; karakter képernyő (VIDEORAM) pozíciójának elrakása a STACK-re                              
+				ld	A,(CHAR_HEIGHT)		; ennyi pixel magas egy karakter
+	WRITE_TEXT_CHAR_LOOP	ld	BC,CHAR_SET_IMAGE_WIDTH	; ennyi byte széles a karakterkészletett tartalmazó image
+				push	af
+				ld	a,(hl)			; LDI
+	color_and_value_1	nop
+				nop
+				nop
+				nop
+				nop
+				nop
+				ld	(de),a
+				inc	de
+				inc	hl
+				dec	bc
+				ld	a,(hl)			; LDI
+	color_and_value_2	nop
+				nop
+				nop
+				nop
+				nop
+				nop
+				ld	(de),a
+				inc	de
+				inc	hl
+				dec	bc
+				pop	af
+				add	HL,BC			; HL -> következő sor a karakterkészletben
+				ex	DE,HL
+				ld	BC,SCREEN_WIDTH-2	; következő sorig ennyit kell lépni a képernyőn (a -2 a kirakott karakter egy sora)
+				add	HL,BC
+				res	6,H			; Ha a 6. bit 1, akkor 48K fölé ért a címzés, ezért azt töröljük, így mindig 32K-48K között lesz HL értéke
+				;set	7,H			; Beállítjuk a 7. bitet, hogy HL értéke ne kerülhessen 32K alá a csökkentés következtében, így nem megy a VIDEORAM alá a címzés
+				ex	DE,HL			; DE: a következő sorra mutat a képernyőn
+				dec	A			; kirakandó sorok csökkentése
+				jp	NZ,WRITE_TEXT_CHAR_LOOP	; ha nem nulla, akkor ugrás a folytatásra                              
+				pop	DE			; a most kirakott karakter képernyő (VRAM) pozíciójának előszedése a STACK-ről
+				;}
+                              	;{ a szöveg következő karakterére lépés
+	WRITE_TEXT_NEXT_CHAR	inc	DE			; egy karakternyi (2 byte)
+				inc	DE			; hely átlépése a képernyőn
+	WRITE_TEXT_SKIP_CHAR	ld	hl,(WRITE_TEXT+1)
+				inc	hl			; IX a szöveg következő karakterére mutat
+				ld	(WRITE_TEXT+1),hl
+				jp	WRITE_TEXT		; ugrás a kiírás elejére
+				
+				
+	; CHAR_SET - 768x10 pixels; 384x10 byte; 96 karakter x 10 sor; 1 karakter: 2 byte x 10 pixel
+	CHAR_SET		db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,32,0,16,0,16,0,80,0,32,128,16,0,80,0,32,128,16,0,0,128,16,0,16,0,0,0,32,128,16,0,0,0,32,128
+				db	0,0,0,0,160,0,0,0,32,0,0,0,0,0,64,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,128,0,0,16,128,0,0,128,0,32,0,16,0,128,0,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,64,0,32,0,32,0,0,0,80,0,32,0,0,0,80,0,32,0,16,0,32,0,32,0,80,0,80,0,32,0,80,0,80,0
+				db	0,0,128,0,160,0,64,128,112,128,192,64,32,0,64,0,32,0,128,0,0,0,0,0,0,0,0,0,0,0,0,64,112,0,96,0,112,0,112,0,48,0,240,128,112,128,240,128,112,0,112,0,112,0,240,0,112,128,240,0,240,128,240,128,112,128,128,128,240,128,240,0,144,0,128,0,128,128,128,128,112,0,240,0,112,0,240,0,112,128,240,128,128,64,128,128,128,128,128,128,128,128,240,128,0,0,128,0,0,0,0,128,0,0,32,0,0,0,128,0,0,0,0,0,128,0,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,112,0,240,0,112,0,112,0,112,0,112,0,128,128,128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,128,0,0,0,240,192,160,0,192,128,80,0,128,0,64,0,64,0,160,128,32,0,0,0,0,0,0,0,0,128,128,128,160,0,128,128,128,128,80,0,128,0,128,0,0,128,128,128,128,128,128,128,128,128,128,0,128,128,128,0,128,0,128,0,128,128,32,0,16,0,160,0,128,0,208,128,192,128,128,128,128,128,128,128,128,128,128,0,32,0,128,64,128,128,160,128,80,0,80,0,0,128,240,0,176,0,112,128,112,128,112,0,240,128,112,128,176,128,96,0,112,0,144,0,16,0,80,0,176,0,112,0,176,0,112,128,176,128,112,128,240,128,128,128,128,128,128,128,128,128,128,64,240,128,128,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,240,0,112,0,96,0,112,0,112,0,112,0,128,128,128,128,128,128
+				db	0,0,128,0,0,0,64,128,112,0,16,0,96,0,0,0,128,0,32,0,112,0,32,0,0,0,240,128,0,0,16,0,128,128,32,0,0,128,48,0,144,0,240,0,240,0,16,0,112,0,128,128,240,128,240,0,128,0,128,128,240,0,240,0,144,128,240,128,32,0,16,0,192,0,128,0,160,128,160,128,128,128,128,128,128,128,128,128,112,0,32,0,128,64,80,0,160,128,32,0,80,0,16,0,0,128,192,128,128,0,128,128,128,128,32,0,128,128,192,128,32,0,16,0,160,0,16,0,160,128,192,128,128,128,192,128,128,128,192,128,128,0,32,0,128,128,128,128,128,128,80,0,64,128,16,0,128,128,224,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,0,128,128,128,32,0,128,128,128,128,128,128,128,128,128,128,128,128
+				db	0,0,128,0,0,0,64,128,32,128,32,0,160,128,0,0,128,0,32,0,240,128,240,128,0,0,0,0,0,0,32,0,128,128,32,0,48,0,0,128,240,128,0,128,128,128,32,0,128,128,112,128,128,128,128,128,128,0,128,128,128,0,128,0,128,128,128,128,32,0,16,0,160,0,128,0,160,128,144,128,128,128,240,0,128,128,240,0,0,128,32,0,128,64,80,0,240,128,80,0,32,0,32,0,112,128,128,128,128,0,128,128,240,128,32,0,128,128,128,128,32,0,16,0,192,0,16,0,160,128,128,128,128,128,128,128,128,128,128,0,112,0,32,0,128,128,80,0,160,128,32,0,64,128,32,0,240,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,112,128,240,128,32,0,128,128,128,128,128,128,128,128,128,128,128,128
+				db	0,0,0,0,0,0,240,192,240,0,64,192,144,0,0,0,64,0,64,0,112,0,32,0,0,0,0,0,192,0,64,0,128,128,32,0,192,0,128,128,16,0,0,128,128,128,64,0,128,128,0,128,128,128,128,128,128,0,128,128,128,0,128,0,128,128,128,128,32,0,16,0,144,0,128,0,128,128,144,128,128,128,128,0,128,128,144,0,0,128,32,0,128,64,80,0,80,0,128,128,32,0,192,0,128,128,128,128,128,0,144,128,128,0,32,0,144,128,128,128,32,0,16,0,160,0,16,0,160,128,128,128,128,128,128,128,144,128,128,0,0,128,32,0,144,128,80,0,160,128,80,0,48,0,64,0,128,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,0,32,0,128,128,128,128,128,128,144,128,144,128,144,128
+				db	0,0,128,0,0,0,64,128,32,0,128,192,96,128,0,0,32,0,128,0,160,128,32,0,128,0,0,0,192,0,128,0,112,0,240,128,240,128,112,0,16,0,240,0,112,0,64,0,112,0,240,0,128,128,240,0,112,128,240,0,240,128,128,0,112,128,128,128,240,128,224,0,128,128,240,0,128,128,128,128,112,0,128,0,112,0,128,128,240,0,32,0,112,128,32,0,80,0,128,128,32,0,240,128,112,64,240,0,112,128,96,128,112,128,32,0,96,128,128,128,32,0,16,0,144,0,16,0,160,128,128,128,112,0,240,0,96,128,128,0,240,0,16,128,224,128,32,0,80,0,128,128,48,0,240,128,128,128,240,0,112,0,112,0,112,0,112,0,112,0,112,0,112,0,112,64,112,128,32,0,112,0,112,0,112,0,224,128,224,128,224,128
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,16,0,0,0,0,0,0,0,0,0,0,0,128,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,112,0,0,0,0,0,224,0,0,0,0,0,0,0,0,0,0,0,128,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				
+; =================================================================
+; STAR SYSTEM (Variables based)
+; Memory Range: $8000 - $BC00
+; =================================================================
+				
+	MAX_STARS		equ	100
+				
+; =================================================================
+; STAR_INIT
+; =================================================================
+	star_init:		
+				ld	hl,star_buffer
+				ld	b,MAX_STARS * 2
+				xor	a
+	.si_loop:		
+				ld	(hl),a
+				inc	hl
+				dec	b
+				jp	nz,.si_loop
+				
+				xor	a
+				ld	(star_index),a
+				ret
+				
+; =================================================================
+; STAR_UPDATE
+; =================================================================
+	star_update:		
+			; --- 1. Melyik csillag? ---
+				ld	a,(star_index)
+				ld	e,a
+				ld	d,0
+				
+				ld	hl,star_buffer
+				add	hl,de
+				add	hl,de
+				
+				ld	(s_current_buff_ptr),hl
+				
+			; --- 2. Törlés ---
+				ld	e,(hl)
+				inc	hl
+				ld	d,(hl)
+				ld	(s_vram_addr),de
+				
+				ld	a,d
+				or	e
+				jp	z,.gen_phase		; Ha 0000, nincs mit törölni
+				
+			; Törlés
+				xor	a
+				ld	(de),a
+				
+	.gen_phase:		
+			; --- 3. ÚJ POZÍCIÓ (Retry Loop) ---
+			; Megpróbálunk 5x keresni helyet. Ha nem sikerül, feladjuk.
+				ld	a,5
+				ld	(s_retry_cnt),a
+				
+	.retry_rnd:		
+			; High Byte ($80 - $BC)
+				call	e_random
+				and	$3F
+				add	a,$80
+	star_height:		cp	$BC
+				jp	nc,.retry_rnd
+				
+				push	af			; <--- FIX: MENTJÜK A KISZÁMOLT MAGAS BÁJTOT!
+				
+			; Low Byte ($00 - $FF)
+			; Az e_random tönkreteszi a D-t, de az A-t stackbe mentettük
+				call	e_random
+				ld	e,a			; E = Random Low
+				
+				pop	af			; <--- FIX: VISSZATÖLTJÜK
+				ld	d,a			; D = Random High
+				
+			; Eredmény mentése
+				ld	(s_vram_addr),de
+				
+			; --- 4. ÜRES? ---
+				ld	a,(de)
+				or	a
+				jp	z,.found_empty		; Üres! Kirajzolhatjuk.
+				
+			; Foglalt volt... Próbáljuk újra?
+				ld	a,(s_retry_cnt)
+				dec	a
+				ld	(s_retry_cnt),a
+				jp	nz,.retry_rnd
+				
+			; 5 próbálkozás után sem talált helyet -> Csillag kikapcsolása
+				jp	.kill_star
+				
+	.found_empty:		
+			; --- 5. RAJZOLÁS ---
+				ld	a,r
+				and	$2A
+				or	128
+				ld	(de),a
+				
+			; Mentés a pufferbe
+				ld	hl,(s_current_buff_ptr)
+				ld	(hl),e
+				inc	hl
+				ld	(hl),d
+				jp	.next_iter
+				
+	.kill_star:		
+			; Nem sikerült lerakni, nullázzuk a puffert
+				ld	hl,(s_current_buff_ptr)
+				xor	a
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				
+	.next_iter:		
+			; --- 6. Index léptetés ---
+				ld	a,(star_index)
+				inc	a
+				cp	MAX_STARS
+				jp	c,.idx_ok
+				xor	a
+	.idx_ok:		
+				ld	(star_index),a
+				
+				ret
+				
+; =================================================================
+; VARIABLES (Memória terület)
+; =================================================================
+	star_index:		db	0
+	s_current_buff_ptr:	dw	0			; Mutató a star_buffer aktuális elemére
+	s_vram_addr:		dw	0			; Ideiglenes VRAM cím tároló
+	s_retry_cnt:		db	0
+	star_buffer:		equ	$0300
+				
+				
+;----------------------------------------------------------
+; PLASMA SYSTEM
+;----------------------------------------------------------
+	INIT_BASE_ZOOM		equ	80			; x 25 = 2000
+				
+	val:			db	0
+	dst:			dw	0
+	x:			db	0
+	y:			db	0
+    ; --- CAM VARIABLES ---
+	camy			db	0
+	camx			db	0
+	shift:			db	0			; Fontos: ez a vertical shift!
+				
+    ; --- BOILING (Finom folyás beállításai) ---
+	; boil_shift: Minél NAGYOBB, annál FINOMABB a hullámzás.
+	; 2 = Erős remegés, 3 = Közepes, 4 = Finom, 5 = Alig látható
+	boil_shift		db	2
+				
+	boil_phase_y		db	0
+	boil_speed_y		db	1			; Lassú sebesség
+				
+	boil_phase_x		db	0
+	boil_speed_x		db	2			; Kicsit gyorsabb X
+				
+	; --- ZOOM CONTROL ---
+	base_zoom		dw	INIT_BASE_ZOOM
+	zoom_word_y		dw	0
+	zoom_word_x		dw	0
+				
+	zoom_osc_speed		db	1
+	zoom_phase		db	0
+				
+	zoom_osc_speed_x	db	1
+	zoom_phase_x		db	0
+				
+	; --- TEMPS ---
+	x_offset_temp		db	0
+	y_offset_temp		db	0
+				
+; ---------------------------------------------------------
+; TITLE EFFECT
+; --------------------------------------------------------- 							
+	LOGO_Y_START		equ	7			; Hányadik sornál kezdődik
+	LOGO_OFFSET_X		equ	13			; (64 - 40) / 2 = 12 bájt margó
+	LOGO_WIDTH		equ	40			; Csak a középső 38 bájtot effektezzük
+	LOGO_HEIGHT		equ	46			; Magasság
+				
+	plasma_timer:		db	0
+				
+	; A kezdőcímbe bele kell számolni a margót (+12)!
+	LOGO_START_ADDR		equ	$8000 + (64*LOGO_Y_START)+LOGO_OFFSET_X
+				
+	e_animate_logo:		
+			; --- OFFSET SZÁMÍTÁS (0..3) ---
+				ld	a,(plasma_timer)
+				inc	a
+				ld	(plasma_timer),a
+				and	3			; Csak az alsó 2 bit (0,1,2,3)
+				ld	c,a
+				ld	b,0			; BC = Offset
+				
+				ld	hl,LOGO_START_ADDR
+				add	hl,bc			; Kezdőcím eltolása a frame szerint (0-3)
+				
+				ld	b,LOGO_HEIGHT
+				ld	de,64 - LOGO_WIDTH
+				
+	.loop_y:		
+				ld	c,b
+				
+				ld	b,LOGO_WIDTH/4		; Csak negyedannyi pixel (9 db)
+				
+	.loop_x:		
+				ld	a,(hl)			; Pixel olvasása
+				or	a
+				jp	z,.skip_pixel		; 0-t békén hagyjuk
+				
+				
+			; --- EFFEKT ---
+				ld	a,(hl)
+				rrca
+				rrca
+				rrca
+				rrca
+				ld	(hl),a
+				
+	.skip_pixel:		
+			; 4-esével lépünk (Every 4th pixel)
+				inc	hl
+				inc	hl
+				inc	hl
+				inc	hl
+				
+				djnz	.loop_x
+				add	hl,de			; Köv. sor címe
+				ld	b,c
+				djnz	.loop_y
+				ret
+				
+; ---------------------------------------------------------
+; PLASMA SYSTEM - ORGANIC & OPTIMIZED
+; ---------------------------------------------------------     
+	Calculate:		
+				
+; --- Y Zoom (STABIL - Ez adja a vázat) ---
+				ld	a,(zoom_phase)
+				ld	hl,zoom_osc_speed
+				add	a,(hl)
+				ld	(zoom_phase),a
+				
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				sra	a
+				sra	a
+				ld	l,a
+				rla
+				sbc	a,a
+				ld	h,a
+				ld	de,(base_zoom)
+				add	hl,de
+				ld	(zoom_word_y),hl
+				
+; --- X Zoom (RANDOM - Ez adja a káoszt) ---
+				
+; 1. Fázis léptetés (Normál)
+				ld	a,(zoom_phase_x)
+				ld	hl,zoom_osc_speed_x
+				add	a,(hl)
+				ld	(zoom_phase_x),a
+				
+; 2. Szinusz számítás
+				add	a,80			; Eltolás
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				sra	a
+				sra	a
+				ld	l,a
+				rla
+				sbc	a,a
+				ld	h,a
+				
+; 3. ITT A "RANDOM DOLOG":
+; Nem fix értéket adunk a base_zoom-hoz, hanem
+; a hardveres random számlálót (R regiszter)!
+				
+				push	hl			; Szinusz elmentve
+				
+				ld	hl,(base_zoom)		; Alap zoom
+				
+				ld	a,r			; RANDOM szám (0-127)
+				and	$3F			; Maszkoljuk 0-63-ra (hogy ne legyen túl durva)
+				ld	e,a
+				ld	d,0
+				add	hl,de			; Base_Zoom + RANDOM
+				
+				ld	d,h
+				ld	e,l			; DE = Base + Random
+				
+				pop	hl			; Szinusz vissza
+				add	hl,de			; Végeredmény
+				
+				ld	(zoom_word_x),hl
+				
+; --- PART 2: BOILING (MARAD A RÉGI) ---
+				
+; --- Y Boiling ---
+				ld	a,(boil_phase_y)
+				ld	hl,boil_speed_y
+				add	a,(hl)
+				ld	(boil_phase_y),a
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				ld	b,a
+				ld	a,(boil_shift)
+				ld	c,a
+				ld	a,b
+	.shift_y_l		sra	a
+				dec	c
+				jp	nz,.shift_y_l
+				ld	(y_offset_temp),a
+				
+; --- X Boiling ---
+				ld	a,(boil_phase_x)
+				ld	hl,boil_speed_x
+				add	a,(hl)
+				ld	(boil_phase_x),a
+				add	a,40
+				ld	l,a
+				ld	h,sin / 256
+				ld	a,(hl)
+				sub	128
+				ld	b,a
+				ld	a,(boil_shift)
+				ld	c,a
+				ld	a,b
+	.shift_x_l		sra	a
+				dec	c
+				jp	nz,.shift_x_l
+				ld	(x_offset_temp),a
+				
+; ---------------------------------------------------------
+; PART 3: PRE-CALC LOOPS (FIXED CAMX SPEED)
+; ---------------------------------------------------------				
+	; --- Y LOOP SETUP ---
+				; 1. Célcím (siny) betöltése a Shadow BC-be
+				ld	bc,siny
+				exx
+				ld	de,(zoom_word_y)	; ; Zoom lépésköz (DE)
+				
+				; 3. Kezdőpozíció kiszámítása HL-be (IX helyett!)
+				ld	a,(camy)
+				ld	hl,y_offset_temp
+				add	a,(hl)
+				
+				ld	h,a			; H = Integer (Index)
+				ld	l,0			; L = Fraction
+				
+				; 4. Szinusz tábla beállítása
+				ld	b,sin / 256		; B = Tábla felső bájt (Fix)
+				
+				; 5. Ciklus számláló (Mivel B foglalt, IYL-t használjuk)
+				ld	iyl,18
+				ld	iyh,0			; init modulation counter
+				
+	.yloop_fast		ld	c,h			; Index áttöltése C-be
+				ld	a,(bc)			; Szinusz olvasása (B=Page, C=Index)
+				add	a,iyh			; linear triangle modulation of only y zoom
+				inc	iyh
+				exx				; 4 T
+				ld	(bc),a			; 7 T - Írás a Shadow BC-be
+				inc	bc			; 6 T
+				exx				; 4 T
+				add	hl,de			; 11 T (IX-nél ez 15 volt)
+				dec	iyl			; 8 T
+				jp	nz,.yloop_fast		; 10 T			
+				
+	; --- X LOOP (OPTIMIZED) ---
+				
+				; 1. Célcím (sinx) betöltése a HÁTTÉR regiszterbe (Shadow BC)
+				ld	bc,sinx
+				exx
+				ld	de,(zoom_word_x)	; DE = Lépésköz (Step)
+				
+				ld	a,(camx)
+				add	a,a			; CamX sebesség
+				add	a,a
+				
+				ld	hl,x_offset_temp
+				add	a,(hl)
+				
+				; HL = Akkumulátor (X koordináta 16.16)
+				ld	h,a			; Felső bájt (Induló pozíció)
+				ld	l,0			; Alsó bájt (Tört)
+				
+				ld	b,sin / 256		; B = Szinusz tábla fix felső bájtja
+				
+				; Loop számláló (Mivel B foglalt, használjuk az IYL-t)
+				ld	iyl,61
+				
+	.xloop_turbo		
+				; --- MATEK (Gyorsabb mint az IX) ---
+				add	hl,de			; 11 T (IX-nél ez 15 T volt)
+				ld	c,h			; 4 T  (Index kinyerése)
+				
+				ld	a,(bc)			; 7 T  (Szinusz olvasása)
+				
+				; --- ÍRÁS (Shadow regiszterrel) ---
+				exx				; 4 T
+				ld	(bc),a			; 7 T  (Írás a sinx-be)
+				inc	bc			; 6 T
+				exx				; 4 T
+				
+				dec	iyl			; 8 T  (Számláló)
+				jp	nz,.xloop_turbo		; 10 T
+				
+; ---------------------------------------------------------
+; PART 4: ADDRESS CALCULATION
+; ---------------------------------------------------------
+				ld	a,(shift)
+				ld	h,a
+				ld	l,0
+				srl	h
+				rr	l
+				ex	de,hl
+				ld	hl,$8441
+				add	hl,de
+				ld	(dst),hl
+				ret
+				
+; ---------------------------------------------------------        
+; RENDER PLASMA - FULL SPEED UNROLLED
+; ---------------------------------------------------------     
+	render_x_offset:	db	0
+				
+	Plasma:			
+				ld	a,0
+				ld	(y),a
+				
+	Plasma_Line_Loop:	
+; --- SOR ELŐKÉSZÍTÉSE ---
+                ; 1. Siny kiszámolása a sorra (IYL-be tároljuk)
+				ld	a,(y)
+				ld	e,a
+				ld	d,0
+				ld	hl,siny
+				add	hl,de
+				ld	a,(hl)
+				ld	iyl,a			; IYL fixen tartja a Siny-t
+				
+                ; 2. Pointerek beállítása
+				ld	de,(dst)		; DE = Képernyő Cél
+				ld	bc,sinx			; BC = Sinx Tábla (C=0)
+				ld	hl,data			; HL = Színtábla (H fix!)
+				
+; --- UNROLLED RENDER (32 blokk = 0..62 offset) ---
+				
+                ; Pixel 0 (Offset 0)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 1 (Offset 2)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 2 (Offset 4)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 3 (Offset 6)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 4 (Offset 8)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 5 (Offset 10)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 6 (Offset 12)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 7 (Offset 14)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 8 (Offset 16)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 9 (Offset 18)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 10 (Offset 20)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 11 (Offset 22)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 12 (Offset 24)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 13 (Offset 26)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 14 (Offset 28)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 15 (Offset 30)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 16 (Offset 32)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 17 (Offset 34)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 18 (Offset 36)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 19 (Offset 38)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 20 (Offset 40)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 21 (Offset 42)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 22 (Offset 44)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 23 (Offset 46)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 24 (Offset 48)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 25 (Offset 50)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 26 (Offset 52)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 27 (Offset 54)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 28 (Offset 56)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 29 (Offset 58)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+                ; Pixel 30 (Offset 60)
+				ld	a,(bc)
+				inc	c
+				inc	c
+				add	a,iyl
+				ld	l,a
+				ld	a,(hl)
+				ld	(de),a
+				inc	de
+				inc	de
+				
+; --- SOR VÉGE & DST LÉPTETÉS ---
+				ld	hl,(dst)
+				inc	h
+				inc	h			; +512 (Következő TVC sor)
+				ld	(dst),hl
+				
+				ld	a,(y)
+				inc	a
+				ld	(y),a
+				cp	$12			; 18 sor
+				jp	nz,Plasma_Line_Loop
+				ret
+				
+; ------------------------------------------------------------
+; MAIN GAME
+;-------------------------------------------------------------
+	fire_repeat_delay	db	0			; shoot repeat delay counter
+				
+	MAIN_GAME:		
+				
+	wait:			halt
+				ld	a,(COLOR_POS)
+				cp	2
+				jp	nz,wait
+				
+				call	Update_Palette		; set up temperature of planet
+;----------------------------
+; CALCULATE AND RENDER PLASMA
+;----------------------------	
+				call	Calculate
+				ld	a,(shift)		; for rendering rows
+				inc	a
+				and	$3
+				ld	(shift),a
+				call	Plasma
+;------------------------
+; RENDER CROSSHAIR (+)	
+;------------------------
+	erease_expl_cnt:	ld	a,0
+				or	a
+				jp	z,rend_cross_hair
+				dec	a
+				ld	(erease_expl_cnt+1),a
+				jp	nz,rend_cross_hair
+				call	erease_explosion_sprite
+				
+	rend_cross_hair:	call	RENDER_CROSSHAIR
+				call	update_shield		; pajzs kijelző inkrementális update
+				call	update_ammo		; muníció kijelző inkrementális update
+;------------------------
+; RENDER BULETS
+;------------------------
+				call	Bullets_EraseOld
+				call	Bullets_UpdateAndDraw
+;------------------------
+; RENDER ENEMIES
+;------------------------		
+				call	e_erase_old_enemies
+				call	e_update_and_draw_enemies
+				
+;------------------------
+; UPDATE AMMO SYSTEM	
+;------------------------		
+				call	a_erase_old_ammo
+				call	a_update_and_draw_ammo
+				
+;------------------------
+; RENDER ENEMY SHOOTING
+;------------------------	
+				ld	hl,e_shot_timer
+				ld	a,(hl)
+				or	a
+				jp	z,me_skip_timer
+				dec	(hl)
+	me_skip_timer:		
+				
+				call	e_erase_bullets
+				call	e_update_and_draw_bullets
+				
+;increment score on every 1 sec iterration				
+	sec_cnt:		ld	a,50
+				dec	a
+				ld	(sec_cnt+1),a
+				jp	nz,zoom_out_intro
+				ld	a,50
+				ld	(sec_cnt+1),a
+				call	inc_score
+;------------------------
+; ZOOM OUT INTRO
+;------------------------				
+	zoom_out_intro:		ld	a,(zoomOUTflag)
+				or	a
+				jp	z,zoom_out_outro
+				ld	hl,(base_zoom)
+				ld	bc,25
+				add	hl,bc
+				ld	(base_zoom),hl
+				ld	a,(zoomOutCnt)
+				dec	a
+				ld	(zoomOutCnt),a
+				jp	nz,MAIN_GAME
+				ld	(zoomOUTflag),a
+				
+;------------------------
+; ZOOM OUT OUTRO
+;------------------------				
+	zoom_out_outro:		ld	a,(reward_flag)
+				or	a
+				jp	z,checktenminutes
+				ld	hl,(base_zoom)
+				ld	bc,40
+				add	hl,bc
+				ld	(base_zoom),hl
+				ld	a,(zoomOutCnt)
+				dec	a
+				ld	(zoomOutCnt),a
+				jp	nz,MAIN_GAME
+				ld	(reward_flag),a
+				jp	reward			; zoom out outro is over, go to REWARD
+				
+; TEN MINUTES IDLE COUNTER
+	checktenminutes:					; after ten minutes idle, go back to menu
+				ld	hl,(tenminutecounter)
+				dec	hl
+				ld	(tenminutecounter),hl
+				ld	a,h
+				or	l
+				jp	nz,handlingkeys
+				jp	escaped
+				
+;------------------------
+; HANDLING KEYS
+;------------------------
+	handlingkeys:		ld	a,(fire_repeat_delay)	; 100ms-onként engedünk 1-1 újabb lövést
+				or	a
+				jp	z,CHK_FIRE_BTN
+				dec	a
+				ld	(fire_repeat_delay),a
+				jp	nz,CHK_Q_BTN
+				
+	CHK_FIRE_BTN:		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	Z,do_fire
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,CHK_Q_BTN
+				
+	do_fire:		ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	a,(ammo)		; check ammo
+				or	a
+				jp	z,CHK_Q_BTN		; NO AMMO, NO SHOOT
+				dec	a
+				ld	(ammo),a
+				
+				ld	a,15			; SHOOT sound FX is started				
+				ld	(SOUND_FX_TYPE),a
+				call	FireBullet		; start a bullet
+				
+				ld	a,10			; set up repeat delay
+				ld	(fire_repeat_delay),a
+				
+				
+	CHK_Q_BTN:		ld	A,2			; check the Q button
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	6,A			; check Q is pressed
+				jp	NZ,CHK_A_BTN
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	hl,(base_zoom)
+				ld	de,$FFFA		; Ez a -6 (Kettes komplemens: $FFFA)
+				add	hl,de
+				jp	c,.save_zoom_dec
+				ld	hl,0			; Ha alámentünk, legyen 0
+	.save_zoom_dec:		ld	(base_zoom),hl
+				jp	CHK_KEY_DOWN
+				
+	CHK_A_BTN:		
+				ld	A,4			; check the A button
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	6,A			; check A is pressed
+				jp	NZ,CHK_KEY_DOWN
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	hl,(base_zoom)
+				ld	de,6
+				add	hl,de
+				ld	a,h
+				cp	8			; 2048 felső bájtja
+				jp	c,.save_zoom_inc	; Ha H < 8, akkor biztosan < 2048 -> OK
+				jp	nz,.clamp_max		; Ha H > 8 (pl. 9), akkor túlmentünk -> CLAMP
+				ld	a,l
+				or	a			; L == 0?
+				jp	z,.save_zoom_inc	; Ha pontosan 2048 ($0800), az még OK				
+	.clamp_max:		ld	hl,2048			; Ha túlmentünk, legyen a max 2048			
+	.save_zoom_inc:		ld	(base_zoom),hl
+				
+	CHK_KEY_DOWN:		ld	A,8			; check the DOWN button
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	2,A			; check DOWN is pressed
+				jp	NZ,CHK_KEY_UP
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	a,(camy)
+				inc	a
+				inc	a
+				ld	(camy),a
+				
+				jp	CHK_KEY_LEFT
+				
+	CHK_KEY_UP:		ld	A,8			; check the UP button
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	1,A			; check UP is pressed
+				jp	NZ,CHK_KEY_LEFT
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	a,(camy)
+				dec	a
+				dec	a
+				ld	(camy),a
+				
+	CHK_KEY_LEFT:		
+				ld	A,8			; check the LEFT button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	6,A			; check LEFT is pressed
+				jp	NZ,CHK_KEY_RIGHT
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	a,(camx)
+				dec	a
+				ld	(camx),a
+				
+				jp	CHK_KEY_CTRL
+				
+	CHK_KEY_RIGHT:		ld	A,8			; check the RIGHT button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check RIGHT is pressed
+				jp	NZ,CHK_KEY_CTRL
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				ld	a,(camx)
+				inc	a
+				ld	(camx),a
+				
+	CHK_KEY_CTRL:		ld	A,7			; check the CTRL button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	4,A			; check CTRL is pressed
+				jp	NZ,CHK_KEY_ESC
+				
+				ld	hl,TENMINUTE
+				ld	(tenminutecounter),hl
+				; pick up ammo if available
+				call	a_check_crosshair_collision
+				jp	MAIN_GAME
+				
+	CHK_KEY_ESC:		ld	A,7			; check the ESC button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check ESC is pressed
+				jp	NZ,MAIN_GAME
+				
+				jp	escaped			; instant game over go to credits screen
+;---------------------------------------------------------------------------------------------------------------------------				
+	RENDER_CROSSHAIR:	
+				ld	a,96
+				ld	($8000+86*64+32),a
+				ld	($8000+87*64+32),a
+				ld	($8000+88*64+32),a
+				ld	($8000+89*64+32),a
+				ld	($8000+90*64+32),a
+				ld	($8000+91*64+32),a
+				ld	($8000+95*64+32),a
+				ld	($8000+96*64+32),a
+				ld	($8000+97*64+32),a
+				ld	($8000+98*64+32),a
+				ld	($8000+99*64+32),a
+				ld	hl,$F0F0		; H=$F0, L=$F0
+				ld	a,$F0			; A 3. byte-hoz kell
+				ld	($8000+92*64+31),hl
+				ld	($8000+92*64+33),a
+				ld	($8000+93*64+31),hl
+				ld	($8000+93*64+33),a
+				ret
+				
+; -------------------------------------------------------------
+; Routine: update_shield
+; Description: Visualizes shield status at $8019.
+;              Updates only the changed segments.
+; Destroys: AF, BC, DE, HL
+; -------------------------------------------------------------
+	update_shield		
+				ld	hl,shield
+				ld	a,(hl)			; Load current shield value
+				inc	hl
+				ld	b,(hl)			; Load old shield value
+				
+				cp	b
+				jp	z,us_exit		; If values are identical, exit immediately (fastest path)
+				
+				ld	(hl),a			; Update old_shield to current value
+				
+    ; Convert 0-255 range to 0-15 block index (divide by 16)
+    ; We use the upper nibble for the visual index
+				rrca				; 4 T, 1 byte  (Bit 0 -> Bit 7-be forog be)
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				and	$0F			; 7 T, 2 byte  (A beforgatott "szemét" bitek törlése)
+				ld	c,a			; C = New block count (Target)
+				
+				ld	a,b
+				rrca				; 4 T, 1 byte  (Bit 0 -> Bit 7-be forog be)
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				and	$0F			; 7 T, 2 byte  (A beforgatott "szemét" bitek törlése)
+				ld	b,a			; B = Old block count (Start)
+				
+				ld	a,c			; A = Target
+				cp	b			; Compare Target vs Start
+				jp	z,us_exit		; If visual block count is same, exit
+				
+    ; Determine direction and color
+    ; Carry set if Target < Start (Damage taken -> Erase)
+				jp	c,us_damage
+				
+	us_recharge		
+    ; Target > Start: Draw White ($F0)
+    ; Range: From B (inclusive) to C (exclusive? No, draw up to C)
+    ; Actually standard loops: Draw from Current Index up to Target Index.
+    ; Example: Old 0, New 1 -> Draw at index 0.
+				ld	d,$A5			; pepita Color
+				jp	us_render_loop
+				
+	us_damage		
+    ; Target < Start: Draw Black ($00)
+    ; We need to erase from Target up to Start.
+    ; Example: Old 1, New 0 -> Erase at index 0.
+				ld	d,$00			; Color Black
+				
+    ; Swap B and C to ensure loop always goes Low -> High
+    ; Now B = Target (Low), C = Start (High)
+				ld	e,b
+				ld	b,c
+				ld	c,e
+				
+    ; Swap complete. Now we loop from old LOW to HIGH regardless of direction.
+    ; wait, if we swap, we just fill the range.
+    ; Correct logic: The range between Old and New needs to be set to 'Color'.
+				
+	us_render_loop		
+    ; Loop from B (Low Index) to C (High Index - 1)
+    ; If B=C, loop finishes.
+				ld	a,b
+				cp	c
+				jp	z,us_exit
+				
+    ; Calculate VRAM address for column B
+    ; Base is $8010. High byte is always $80.
+    ; Low byte is $10 + B.
+				ld	h,$80
+				ld	a,$19
+				add	a,b
+				ld	l,a			; HL = $8019 + Column Index
+				
+    ; Draw vertical strip (4 pixels high)
+    ; Optimization: All 4 rows fit in the same 256-byte page ($80xx).
+    ; Row strides are +64 bytes ($40 hex).
+				
+				ld	(hl),d			; Row 1
+				
+				ld	a,l
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 2
+				
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 3
+				
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 4
+				
+    ; Next column
+				inc	b
+				jp	us_render_loop
+				
+	us_exit			
+				ret
+				
+; -------------------------------------------------------------
+; Routine: update_ammo
+; Description: Visualizes ammo status at $8119.
+;              Updates only the changed segments.
+; Destroys: AF, BC, DE, HL
+; -------------------------------------------------------------
+	update_ammo		
+				ld	hl,ammo
+				ld	a,(hl)			; Load current shield value
+				inc	hl
+				ld	b,(hl)			; Load old shield value
+				
+				cp	b
+				jp	z,ua_exit		; If values are identical, exit immediately (fastest path)
+				
+				ld	(hl),a			; Update old_ammo to current value
+				
+    ; Convert 0-255 range to 0-15 block index (divide by 16)
+    ; We use the upper nibble for the visual index
+				rrca				; 4 T, 1 byte  (Bit 0 -> Bit 7-be forog be)
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				and	$0F			; 7 T, 2 byte  (A beforgatott "szemét" bitek törlése)
+				ld	c,a			; C = New block count (Target)
+				
+				ld	a,b
+				rrca				; 4 T, 1 byte  (Bit 0 -> Bit 7-be forog be)
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				rrca				; 4 T, 1 byte
+				and	$0F			; 7 T, 2 byte  (A beforgatott "szemét" bitek törlése)
+				ld	b,a			; B = Old block count (Start)
+				
+				ld	a,c			; A = Target
+				cp	b			; Compare Target vs Start
+				jp	z,ua_exit		; If visual block count is same, exit
+				
+    ; Determine direction and color
+    ; Carry set if Target < Start (Damage taken -> Erase)
+				jp	c,ua_damage
+				
+	ua_recharge		
+    ; Target > Start: Draw White ($F0)
+    ; Range: From B (inclusive) to C (exclusive? No, draw up to C)
+    ; Actually standard loops: Draw from Current Index up to Target Index.
+    ; Example: Old 0, New 1 -> Draw at index 0.
+				ld	d,$AA			; ammo Color
+				jp	ua_render_loop
+				
+	ua_damage		
+    ; Target < Start: Draw Black ($00)
+    ; We need to erase from Target up to Start.
+    ; Example: Old 1, New 0 -> Erase at index 0.
+				ld	d,$00			; Color Black
+				
+    ; Swap B and C to ensure loop always goes Low -> High
+    ; Now B = Target (Low), C = Start (High)
+				ld	e,b
+				ld	b,c
+				ld	c,e
+				
+    ; Swap complete. Now we loop from old LOW to HIGH regardless of direction.
+    ; wait, if we swap, we just fill the range.
+    ; Correct logic: The range between Old and New needs to be set to 'Color'.
+				
+	ua_render_loop		
+    ; Loop from B (Low Index) to C (High Index - 1)
+    ; If B=C, loop finishes.
+				ld	a,b
+				cp	c
+				jp	z,ua_exit
+				
+    ; Calculate VRAM address for column B
+    ; Base is $8010. High byte is always $80.
+    ; Low byte is $10 + B.
+				ld	h,$81
+				ld	a,$19
+				add	a,b
+				ld	l,a			; HL = $8119 + Column Index
+				
+    ; Draw vertical strip (4 pixels high)
+    ; Optimization: All 4 rows fit in the same 256-byte page ($80xx).
+    ; Row strides are +64 bytes ($40 hex).
+				
+				ld	(hl),d			; Row 1
+				
+				ld	a,l
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 2
+				
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 3
+				
+				add	a,$40
+				ld	l,a
+				ld	(hl),d			; Row 4
+				
+    ; Next column
+				inc	b
+				jp	ua_render_loop
+				
+	ua_exit			
+				ret
+				
+; =================================================================
+; SCORING SYSTEM
+; =================================================================
+	INIT_SHIELD_VALUE	equ	255			; 255
+	INIT_AMMO_VALUE		equ	128
+	AMMO_INCREMENT		equ	64
+				
+	score1:			db	0
+	score2:			db	0
+	score3:			db	0
+	temp_score:		ds	3
+				db	'0'			; leading zero of score string
+	scoreSTR:		ds	8
+				db	0			; end character
+				
+				
+	shield:			db	INIT_SHIELD_VALUE
+	old_shield		db	0			; Previous state for incremental update	
+				
+	ammo			db	INIT_AMMO_VALUE
+	old_ammo		db	0
+				
+; processing hit of my ship
+	handling_hit:		
+				ld	a,60			; initiate explosion sound
+				ld	(EXPLOSION_FX_TYPE),a
+				ld	a,08			; border is dark red
+				out	(0),a			; IRQ will restore back to black
+				
+	dec_shield:		
+				ld	a,(shield)
+				cp	4			; Megnézzük, hogy az érték kisebb-e, mint 3
+				jp	c,.do_game_over		; Ha Carry van (A = 0, 1 vagy 2), akkor Game Over
+				dec	a			; Decrement shield
+				dec	a			; the enemy hit is painfull :)
+				dec	a
+				ld	(shield),a		; Store it back
+				jp	z,.do_game_over
+				
+				ret				; Return if it's still > 0
+				
+	.do_game_over:		
+				pop	bc			; Clean up stack 
+				pop	bc			; we are inside double call
+				jp	game_over		; Jump to death instead of return
+				
+				
+				
+	inc_shield:		
+				ld	a,(shield)
+				cp	255			; Is it at max? (half of max)
+				ret	nc			; If yes, do nothing and return
+				inc	a			; Increase shield
+				ld	(shield),a		; Store it back
+				ret
+; init score				
+	init_score:		xor	a
+				ld	(score1),a
+				ld	(score2),a
+				ld	(score3),a
+				ret
+				
+; increment 3 digit score				
+	inc_score:		
+				ld	hl,score1
+				inc	(hl)			; Increment LSB
+				ret	nz			; If no overflow (Z=0), return immediately (Fastest path)
+				
+				inc	hl
+				inc	(hl)			; Increment Mid byte
+				ret	nz			; If no overflow, return
+				
+				inc	hl
+				inc	(hl)			; Increment MSB
+				ret				; Done
+; Add A to Score (24-bit)
+	add_to_score:		
+				ld	hl,score2
+				
+    ; --- 1. LSB hozzáadása ---
+				add	a,(hl)			; A = score2 + A
+				ld	(hl),a			; Eredmény visszaírása
+				ret	nc			; Ha nincs Carry, készen vagyunk (Gyors kilépés)
+				
+    ; --- 2. Átvitel kezelése (MID) ---
+				inc	hl			; HL -> score2
+				inc	(hl)			; score2++ (NEM bántja a Carry flaget, de állítja a Zero-t)
+				ret
+				
+;score_to_str				
+	score_to_str:		
+    ; --- Init ---
+				ld	a,(score1)
+				ld	(temp_score),a
+				ld	a,(score2)
+				ld	(temp_score+1),a
+				ld	a,(score3)
+				ld	(temp_score+2),a
+				
+				ld	hl,DecTable		; Point to Powers of 10
+				ld	de,scoreSTR		; Point to Output String
+				ld	b,8			; 8 digits to process
+				
+	DigitLoop:		
+				ld	c,'0'			; Current digit counter (ASCII '0')
+				
+	SubLoop:		
+				call	Sub24IfPossible
+				jp	c,DigitDone		; If Carry set (negative), digit is done
+				
+				inc	c			; Increment digit char
+				jp	SubLoop			; Try subtracting again
+				
+	DigitDone:		
+				ld	a,c
+				ld	(de),a			; Store ASCII digit
+				inc	de
+				
+    ; Advance table pointer by 3 bytes (for the next power)
+				inc	hl
+				inc	hl
+				inc	hl
+				
+				djnz	DigitLoop		; Loop for all 8 digits
+				
+				ret
+				
+	Sub24IfPossible:	
+				push	de
+				push	hl			; Save Table Pointer
+				push	bc			; Save Loop Counters (B, C) to free them up!
+				
+    ; --- Load 24-bit Constant from (HL) ---
+    ; We use C, B, D registers for the constant Power
+				ld	c,(hl)			; Power Low -> C
+				inc	hl
+				ld	b,(hl)			; Power Mid -> B
+				inc	hl
+				ld	d,(hl)			; Power High -> D
+				
+    ; --- Try Subtraction ---
+				
+    ; 1. LSB (temp - PowerLow)
+				ld	a,(temp_score)
+				sub	c
+				ld	e,a			; Store Result Low in E (temp)
+				
+    ; 2. MID (temp - PowerMid - Carry)
+				ld	a,(temp_score+1)
+				sbc	a,b
+				ld	l,a			; Store Result Mid in L (temp - safe because HL is pushed)
+				
+    ; 3. MSB (temp - PowerHigh - Carry)
+				ld	a,(temp_score+2)
+				sbc	a,d
+    ; Result High is now in A
+				
+    ; --- Check Result ---
+				jr	c,Fail			; If Carry set, result is negative -> Fail
+				
+    ; --- Success: Update Memory (Commit) ---
+    ; Important: A holds the MSB Result. Write it first!
+				ld	(temp_score+2),a
+				
+				ld	a,l			; Retrieve Mid Result
+				ld	(temp_score+1),a
+				
+				ld	a,e			; Retrieve Low Result
+				ld	(temp_score),a
+				
+    ; --- Exit Success ---
+				pop	bc			; Restore counters
+				pop	hl			; Restore table pointer
+				pop	de
+				or	a			; Clear Carry Flag (Success)
+				ret
+				
+	Fail:			
+				pop	bc			; Restore counters
+				pop	hl			; Restore table pointer
+				pop	de
+				scf				; Set Carry Flag (Fail)
+				ret
+				
+	DecTable:		
+				db	$80,$96,$98		; 10 000 000
+				db	$40,$42,$0F		; 1 000 000
+				db	$A0,$86,$01		; 100 000
+				db	$10,$27,$00		; 10 000
+				db	$E8,$03,$00		; 1 000
+				db	$64,$00,$00		; 100
+				db	$0A,$00,$00		; 10
+				db	$01,$00,$00		; 1
+				
+; =================================================================
+; planet temperature system
+;
+; PALETTE UPDATE ROUTINE
+; Input: base_zoom (16-bit)
+; Output: Writes directly to plasma_temp2+1 and plasma_temp3+1
+; =================================================================
+	Update_Palette:		
+                ; A base_zoom felső bájtjának vizsgálata
+                ; 0-2048 tartományban a felső bájt $00 és $08 között mozog.
+                ; Minden 512-es lépésnél kell váltani.
+                ; $00-$01 -> 0. index
+                ; $02-$03 -> 1. index
+                ; $04-$05 -> 2. index
+                ; $06-$08 -> 3. index
+				
+				ld	a,(base_zoom+1)		; Felső bájt betöltése
+				srl	a			; Osztás 2-vel (Bit 0 kiléptetése)
+				
+                ; Biztonsági ellenőrzés: Ha >= 3, akkor legyen 3
+                ; (Ez kezeli a 2048-as értéket is, ami $08 -> $04 lenne)
+				cp	3
+				jp	c,.in_range		; Ha A < 3, ugrás (JP, nem JR!)
+				ld	a,3			; Ha túlléptük, limitáljuk 3-ra
+	.in_range:		
+                ; A regiszterben most 0, 1, 2 vagy 3 van.
+                ; Szorozzuk meg 2-vel, mert szópárokat olvasunk (word lookup)
+				add	a,a
+				ld	b,a			; save the distance 0,1,2,3
+                ; Táblázat címének kiszámítása
+				ld	hl,.palette_table
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				
+                ; Színek beolvasása és beírása a kódba
+				ld	a,(hl)			; Első változó szín
+				ld	(plasma_temp2+1),a
+				
+				inc	hl
+				ld	a,(hl)			; Második változó szín
+				ld	(plasma_temp3+1),a
+				
+		; handling shield on every 4th iterration
+	ci_itr:			ld	a,4
+				dec	a
+				ld	(ci_itr+1),a
+				ret	nz
+				ld	a,4
+				ld	(ci_itr+1),a
+				
+				ld	a,b			; restore distance
+				or	a
+				jp	nz,check_increment
+				call	dec_shield		; distance is 0, lets decrease the shield
+				ret
+	check_increment:	cp	6
+				ret	nz
+				
+				call	inc_shield		; distance is > 6, lets increase the shield
+				ret
+				
+; ---------------------------------------------------------
+; Színtáblázat (Zónánként 2 bájt)
+; Sorrend: 3. szín, 4. szín
+; ---------------------------------------------------------
+	.palette_table:		
+                ; Zone 0 (Legközelebb): Piros, Sárga
+				db	$44, $54
+                ; Zone 1 (Távolabb): Sötét Vörös, Piros
+				db	$04, $44
+                ; Zone 2 (Még távolabb): Sötét Vörös, Kék
+				db	$04, $41
+                ; Zone 3 (Legtávolabb): Sötét Kék, Világos Kék
+				db	$01, $41
+				
+; =================================================================
+; BULLET SYSTEM 
+; Max 8 bullets, converging to center
+; =================================================================
+				
+; --- KONSTANSOK ---
+	MAX_BULLETS		equ	8
+	RETICLE_Y		equ	92			; A célkereszt Y pozíciója (Cél)
+	START_Y			equ	154			; Innen indul a lövés (lentről)
+	GUN_LEFT_X		equ	7			; Bal oldali ágyú X (bájt)
+	GUN_RIGHT_X		equ	59			; Jobb oldali ágyú X (bájt)
+				
+; Sebesség: Hány frame alatt érjen a célba? (pl. 32 frame)
+; Távolság Y = 140 - 76 = 64 pixel.
+; Sebesség Y = 64 / 32 = 2.0 pixel/frame -> $0200 (Fixed Point)
+	BULLET_SPEED_Y		equ	$FE00			; -2.00 (felfelé megyünk, tehát negatív)
+				
+	BULLET_STRUCTURE_SIZE	equ	9
+; --- MEMÓRIA TERÜLET (RAM) ---
+; Minden lövedék 8 bájt:
+; +0: Status (0=halott, 1=aktív)
+; +1: Y High (Egész)
+; +2: Y Low  (Tört)
+; +3: X High (Egész - 0..63)
+; +4: X Low  (Tört)
+; +5: dY High (Sebesség Y) - Ezt tárolhatnánk konstansként is, de így flexibilis
+; +6: dY Low
+; +7: dX High (Sebesség X)
+; +8: dX Low
+; Összesen 9 bájt / lövedék
+	bullet_data:		equ	BULLET_DATA_ADDR
+	gun_toggle:		db	0			; 0=Bal ágyú, 1=Jobb ágyú
+	drift_value		db	0
+; =================================================================
+; InitBullets
+; Törli a lövedék táblát (játék elején hívd meg)
+; =================================================================
+	InitBullets:		
+				ld	hl,bullet_data
+				ld	b,MAX_BULLETS * BULLET_STRUCTURE_SIZE
+				xor	a
+	.loop:			ld	(hl),a
+				inc	hl
+				djnz	.loop
+				ret
+				
+; =================================================================
+; FireBullet
+; Megpróbál indítani egy új lövedéket.
+; Automatikusan váltogat a bal és jobb ágyú között.
+; =================================================================
+	FireBullet:		
+				ld	ix,bullet_data
+				ld	b,MAX_BULLETS
+				
+	.find_slot:		ld	a,(ix+0)		; Státusz lekérése
+				or	a			; 0 = inaktív?
+				jp	z,.spawn		; Találtunk helyet!
+				
+				ld	de,BULLET_STRUCTURE_SIZE; Ugrás a következőre
+				add	ix,de
+				djnz	.find_slot
+				ret				; Nincs hely, kilépünk
+				
+	.spawn:			
+                ; Aktiválás
+				ld	(ix+0),1
+				
+                ; Kezdő Y pozíció beállítása
+				ld	(ix+1),START_Y
+				ld	(ix+2),0
+				
+                ; Y Sebesség (Felfelé megy)
+				ld	(ix+5),BULLET_SPEED_Y>>8
+				ld	(ix+6),BULLET_SPEED_Y&$FF
+				
+                ; Ágyú választás (Bal vagy Jobb)
+				ld	a,(gun_toggle)
+				xor	1			; Toggle
+				ld	(gun_toggle),a
+				or	a
+				jp	z,.setup_left
+				
+	.setup_right:		
+                ; Jobb ágyú: X=52, Cél=31 -> Balra megy (Negatív sebesség)
+				ld	(ix+3),GUN_RIGHT_X
+				ld	(ix+4),0
+				
+                ; Sebesség számítás: (31 - 52) / 32 frame = -0.65
+                ; -0.65 hexában kb $FF50 (16-bites signed)
+				ld	(ix+7),$FF
+				ld	(ix+8),$38
+				ret
+				
+	.setup_left:		
+                ; Bal ágyú: X=10, Cél=31 -> Jobbra megy (Pozitív sebesség)
+				ld	(ix+3),GUN_LEFT_X
+				ld	(ix+4),0
+				
+                ; Sebesség számítás: (31 - 10) / 32 frame = +0.65
+                ; +0.65 hexában kb $00A0
+				ld	(ix+7),$00
+				ld	(ix+8),$B8
+				ret
+				
+; =================================================================
+; Bullets_EraseOld
+; Törli a lövedékeket a jelenlegi (régi) pozíciójukon.
+; =================================================================
+	Bullets_EraseOld:	
+				ld	ix,bullet_data
+				ld	b,MAX_BULLETS
+				
+	.erase_loop:		
+				ld	a,(ix+0)		; Aktív?
+				or	a
+				jp	z,.next_erase		; Ha 0, nem kell törölni (már halott)
+				
+                ; Pozíció betöltése
+				ld	h,(ix+1)		; Y High
+				ld	e,(ix+3)		; X High
+				
+                ; Cím kiszámolása és törlés
+				ld	d,$80
+				call	CalcVRAMAddr		; HL = VRAM cím
+				
+				xor	a			; A = 0 (Törlő szín)
+				ld	(hl),a			; Felső pixel törlése
+				ld	de,64
+				add	hl,de
+				ld	(hl),a			; Alsó pixel törlése
+				
+	.next_erase:		
+				ld	de,BULLET_STRUCTURE_SIZE; Ugrás a következőre
+				add	ix,de
+				djnz	.erase_loop
+				ret
+				
+; =================================================================
+; Bullets_UpdateAndDraw
+; Frissíti a fizikát, és kirajzolja az új helyre.
+; Input: NINCS (A drift paraméter megszűnt)
+; =================================================================
+	Bullets_UpdateAndDraw:	
+				ld	ix,bullet_data
+				ld	c,MAX_BULLETS		; C = Loop counter
+				
+	.update_loop:		
+				ld	a,(ix+0)		; Aktív?
+				or	a
+				jp	z,.next_update
+				
+				; --- Y FIZIKA ---
+				ld	l,(ix+2)		; Y Low
+				ld	h,(ix+1)		; Y High
+				ld	e,(ix+6)		; dY Low
+				ld	d,(ix+5)		; dY High
+				add	hl,de
+				ld	(ix+2),l		; Mentés
+				ld	(ix+1),h
+				
+				; Ellenőrzés: Elértük a végét?
+				ld	a,h
+				cp	RETICLE_Y
+				jp	c,.kill_bullet		; Ha túlment, deaktiváljuk
+				
+				; --- X FIZIKA (Drift nélkül) ---
+				ld	l,(ix+4)		; X Low
+				ld	h,(ix+3)		; X High
+				ld	e,(ix+8)		; dX Low
+				ld	d,(ix+7)		; dX High
+				add	hl,de			; X = X + dX
+				
+				; Itt volt a drift levonás, most simán mentünk tovább
+				
+				ld	(ix+4),l		; Mentés
+				ld	(ix+3),h
+				
+				; Ellenőrzés: Kiment oldalra? (0..63)
+				ld	a,h
+				cp	64
+				jp	nc,.kill_bullet
+				
+				; --- KIRAJZOLÁS ($F0) ---
+				ld	h,(ix+1)		; Új Y
+				ld	e,(ix+3)		; Új X
+				
+				ld	d,$80
+				call	CalcVRAMAddr		; HL = VRAM cím
+				
+				ld	a,$F0			; Lövedék színe
+				ld	(hl),a
+				ld	de,64
+				add	hl,de
+				ld	(hl),a
+				
+				jp	.next_update
+				
+	.kill_bullet:		
+				ld	(ix+0),0
+; lets check if enemy is hit by my finished shoot				
+				push	ix
+				push	bc
+				call	check_enemy_HIT
+				pop	bc
+				pop	ix
+				
+				jp	.next_update
+				
+	.next_update:		
+				ld	de,BULLET_STRUCTURE_SIZE
+				add	ix,de
+				dec	c
+				jp	nz,.update_loop
+				ret
+				
+; =================================================================
+; CalcVRAMAddr (Segédrutin)
+; Input:  H = Y (0-239), E = X (0-63), DE video RAM BASE cím
+; Output: HL = Videomemória cím ($8000 + Y*64 + X)
+; =================================================================
+	CalcVRAMAddr:		
+				ld	l,h
+				ld	h,0
+                ; Szorzás 64-gyel (Shift x6)
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				
+				ld	a,h
+				add	a,d
+				ld	h,a
+				
+				ld	d,0
+				add	hl,de			; + X
+				ret
+				
+; =================================================================
+; CHECK ENEMY HIT AND INITIATE EXPLOSION ON HIT
+; =================================================================
+	CH_CROSS_Y		equ	92
+	CH_CROSS_X		equ	31
+	HITBOX_W		equ	6
+	HITBOX_H		equ	8
+	OFFSET_Y		equ	4
+	OFFSET_X		equ	4
+				
+	check_enemy_HIT:	
+				ld	ix,enemy_data
+				ld	b,MAX_ENEMIES
+	ch_loop:		
+			; --- 1. Aktivitás ---
+				ld	a,(ix+0)
+				or	a
+				jp	z,ch_next_enemy
+				
+			; --- 2. Láthatóság
+				ld	a,(ix+3)		;+3: WasVisible and enemy ship type
+				cp	5			; only gigantic (type 5) can be hit
+				jp	nz,ch_next_enemy
+				
+			; --- 3. Check X Collision ---
+			; Crosshair X (32) must be within [EnemyX ... EnemyX+3]
+				ld	a,31			; Crosshair X
+				sub	(ix+5)			; LastScrX
+				cp	2			; Sprite Width (bytes)
+				jp	nc,ch_next_enemy	; If Carry Clear (Result >= 4), No Hit
+				
+			; --- 4. Check Y Collision ---
+			; Crosshair Y (92) must be within [EnemyY ... EnemyY+7]
+				ld	a,74			; Crosshair Y
+				sub	(ix+4)			; LastScrY
+				cp	4			; Sprite Height (lines)
+				jp	nc,ch_next_enemy	; If Carry Clear (Result >= 8), No Hit
+				
+			; --- HIT FOUND! ---
+				call	enemy_HIT
+				ld	(ix+3),10		; Type 10 -> enemy explosion animation
+				
+				ld	a,(num_of_living_enemies)
+				dec	a
+				ld	(num_of_living_enemies),a
+				jp	z,jump_case		; ha elfogyott az ellenség
+				call	display_num_enemy
+				ret				; ha még van élő ellenség, akkor return
+				
+	jump_case:		call	display_num_enemy
+				ld	a,1
+				ld	(reward_flag),a
+				ld	a,255
+				ld	(zoomOutCnt),a
+				ret
+				
+	ch_next_enemy:		
+				ld	de,E_STRUCT_SIZE
+				add	ix,de
+				djnz	ch_loop
+				ret
+				
+	enemy_HIT:		
+				ld	a,32			; initiate explosion sound
+				ld	(EXPLOSION_FX_TYPE),a
+				call	render_explosion_sprite
+				
+; on hit enemy add 65280 score				
+				ld	a,255
+				call	add_to_score
+				ld	a,255
+				call	add_to_score
+				ret
+				
+	render_explosion_sprite:	
+				ld	HL,EXPLOSION_SPRITE_ADDR
+				ld	DE,$969d
+				ld	B,16
+	DrawSpriteRow:		
+				ldi
+				ldi
+				ldi
+				ldi
+				ldi
+				ldi				; 6 byte másolás
+				
+            ; DE += 58
+				ld	A,E
+				add	A,58
+				ld	E,A
+				jr	NC,dsr_NoCarry
+				inc	D
+	dsr_NoCarry:		
+				
+				djnz	DrawSpriteRow
+				ld	a,8			; initiate erase on 4th render cycle
+				ld	(erease_expl_cnt+1),a
+				ret
+				
+	erease_explosion_sprite:	
+				ld	DE,$969d
+				ld	B,16
+				xor	A			; A = 0
+				
+	ees_ClearRow:		
+				ld	(DE),A
+				inc	DE
+				ld	(DE),A
+				inc	DE
+				ld	(DE),A
+				inc	DE
+				ld	(DE),A
+				inc	DE
+				ld	(DE),A
+				inc	DE
+				ld	(DE),A
+				inc	DE			; 6 byte kész
+				
+            ; DE += 58
+				ld	HL,58
+				add	HL,DE
+				ex	DE,HL
+				
+				djnz	ees_ClearRow
+				ret
+				
+; display number of remaining enemies on the dashboard	
+; INPUT? A new NUM of ENEMY			
+	display_num_enemy:	
+				call	Convert8BitDec
+				ld	a,h
+				ld	(scoreSTR),a
+				ld	a,l
+				ld	(scoreSTR+1),a
+				xor	a
+				ld	(scoreSTR+2),a
+				ld	hl,$b79f
+				ld	(VRAM_POSITION),hl
+				ld	DE,scoreSTR
+				call	RST30DB2
+				ret
+				
+; ---------------------------------------------------------
+; CONVERT A TO 2-DIGIT ASCII (00-99)
+; Input:  A = value (0-99)
+; Output: H = Tens character ('0'-'9')
+;         L = Ones character ('0'-'9')
+; ---------------------------------------------------------
+	Convert8BitDec:		
+				ld	c,-1			; Initialize tens counter
+	.tens_loop:		
+				inc	c			; Increment tens
+				sub	10			; Subtract 10
+				jr	nc,.tens_loop		; Loop if result is positive
+				
+				add	a,10			; Restore remainder (ones)
+				
+    ; Convert digits to ASCII/Screen codes
+				add	a,$30			; Convert ones to '0'-'9' ($30 is '0' in ASCII)
+				ld	l,a			; Store ones in L
+				
+				ld	a,c			; Load tens count
+				add	a,$30			; Convert tens to '0'-'9'
+				ld	h,a			; Store tens in H
+				ret
+				
+; =================================================================
+; ENEMY SYSTEM - STATIC 256x256 WORLD (Prefix: e_)
+; =================================================================
+	TOTAL_ENEMIES		equ	12			; must be destroyed to win
+	MAX_ENEMIES		equ	3			; present in the game space at the same time
+	ENEMY_REBORN_COUNTER	equ	TOTAL_ENEMIES - MAX_ENEMIES
+				
+	E_STRUCT_SIZE		equ	12			; MODIFIED: 9 -> 12 bytes
+	E_VIEW_W		equ	64			; Screen width (bytes)
+	E_VIEW_H		equ	134			; Screen height (lines)
+	E_MOVE_SPEED		equ	4			; Higher = Slower (1 = max speed)
+				
+; --- STRUCTURE OFFSETS ---
+; +0: Status (1=Active)
+; +1: WorldY (0-255)
+; +2: WorldX (0-255)
+; +3: WasVisible (Flag for erase logic) + enemy ship TYPE (0,1,2,3,4,5)
+; +4: LastScrY (Screen Y coord for erasing)
+; +5: LastScrX (Screen X coord for erasing)
+; +6, +7: RadarY, RadarX
+; +8: WorldZ (0-255)
+; --- NEW VARIABLES ---
+; +9:  MoveTimer (Counter until direction change)
+; +10: MoveDir   (Bits: 0=Right, 1=Left, 2=Down, 3=Up)
+; +11: SpeedCnt  (Counter for movement speed)
+				
+; =================================================================
+; E_INIT_ENEMIES
+; =================================================================
+	e_init_enemies:		
+				ld	ix,enemy_data
+				ld	b,MAX_ENEMIES
+	e_init_loop:		
+				ld	(ix+0),1		; Set Active status
+				; --- Y Koordináta ---
+				call	e_random
+				ld	(ix+1),a		; WorldY
+				
+			; --- X Koordináta ---
+				call	e_random
+				ld	(ix+2),a		; WorldX
+				
+			; --- Z Koordináta (EZ HIÁNYZOTT) ---
+				call	e_random
+				cp	180			; biztosítjuk hogy ne legyen nagyon eltávolodva a bolygótól az ellenség
+				jr	c,.ok
+				sub	180
+	.ok:			
+				ld	(ix+8),a		; WorldZ (0-179)
+				
+				ld	(ix+3),0		; WasVisible = 0
+				
+			; --- Init Movement vars ---
+				call	e_random
+				ld	(ix+9),a		; Random initial timer
+				ld	(ix+10),a		; Random initial direction
+				ld	(ix+11),E_MOVE_SPEED	; Init speed counter
+				
+				ld	de,E_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,e_init_loop
+				
+; init counters
+				ld	a,ENEMY_REBORN_COUNTER
+				ld	(num_of_enemies_reborn),a
+				ld	a,TOTAL_ENEMIES
+				ld	(num_of_living_enemies),a
+				ret
+				
+; =================================================================
+; E_ERASE_OLD_ENEMIES
+; =================================================================
+	e_erase_old_enemies:	
+				ld	ix,enemy_data
+				ld	b,MAX_ENEMIES
+	e_erase_loop:		
+				ld	a,(ix+0)
+				or	a
+				jp	z,e_next_erase
+				
+				call	e_radar_erase
+				
+			; --- CHECK TYPE ---
+				ld	a,(ix+3)		; This is TYPE (0,1,2,3,4,5)
+				or	a
+				jp	z,e_next_erase		; If 0, it was not visible -> Skip
+				
+				ld	h,(ix+4)		; LastScrY -> Loaded into H
+				ld	e,(ix+5)		; LastScrX -> Loaded into E
+				push	bc
+				
+			; Set D to Base Address ($84 or $80)
+				ld	d,$84
+				
+			; --- BRANCH BY SIZE ---
+				cp	10			; Type 10: Exploded
+				jp	nz,.erase_chk_next
+				
+; check wether the enemy is inactive forever or must be reactivated on plazma side
+				ld	a,(num_of_enemies_reborn)
+				or	a
+				jp	z,.no_more_reborn	; if counter zero, no more enemy reborn
+				dec	a
+				ld	(num_of_enemies_reborn),a
+; REBORN replace and deploy closer to planet dangerous plasma
+				ld	a,(ix+1)
+				add	a,80
+				ld	(ix+1),a		; WorldY megy 80-al "arrébb"
+				ld	a,(ix+2)
+				add	a,80
+				ld	(ix+2),a		; WorldX megy 80-al "arrébb"
+				ld	a,(ix+8)
+				srl	a
+				ld	(ix+8),a		; WorldZ felezés -> közeledik a plazma felszínhez, nehezebb lessz kilőni
+				ld	(ix+3),0		; WasVisible = 0
+				ld	(ix+0),1		; ACTIVATE again
+				jp	.erase_gigantic
+				
+	.no_more_reborn		ld	(ix+0),0		; INACTIVATE
+				jp	.erase_gigantic
+				
+	.erase_chk_next:	cp	5			; Type 5: Gigantic
+				jp	z,.erase_gigantic
+				cp	4
+				jp	z,.erase_huge
+				cp	3
+				jp	z,.erase_med
+				cp	2
+				jp	z,.erase_small
+				
+			; Default: Dot (Type 1)
+	.erase_dot:		call	e_clr_dot
+				jp	.erase_fin
+				
+	.erase_small:		call	e_clr_small
+				jp	.erase_fin
+				
+	.erase_med:		call	e_clr_med
+				jp	.erase_fin
+				
+	.erase_huge:		call	e_clr_huge
+				jp	.erase_fin
+				
+	.erase_gigantic:	call	e_clr_gigantic
+				
+	.erase_fin:		pop	bc
+				ld	(ix+3),0		; Erase done, reset flag
+				
+	e_next_erase:		ld	de,E_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,e_erase_loop
+				ret
+				
+; --- ERASE ROUTINES ---
+				
+	e_clr_dot:						; 1x2 pixel
+				call	CalcVRAMAddr
+				xor	a
+				ld	(hl),a
+				ld	bc,64
+				add	hl,bc
+				ld	(hl),a
+				ret
+				
+	e_clr_small:						; 1x4 pixel
+				call	CalcVRAMAddr
+				ld	b,4
+				xor	a
+	.cl_s:			ld	(hl),a
+				push	bc
+				ld	bc,64
+				add	hl,bc
+				pop	bc
+				dec	b
+				jp	nz,.cl_s
+				ret
+				
+	e_clr_med:						; 2x5 pixel
+				call	CalcVRAMAddr
+				ld	b,5
+				xor	a
+	.cl_m:			ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				dec	hl
+				push	de
+				ld	de,64
+				add	hl,de
+				pop	de
+				dec	b
+				jp	nz,.cl_m
+				ret
+				
+	e_clr_huge:						; 3x6 pixel
+				call	CalcVRAMAddr
+				ld	b,6
+				xor	a
+	.cl_h:			ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				ld	de,62
+				add	hl,de
+				dec	b
+				jp	nz,.cl_h
+				ret
+				
+	e_clr_gigantic:		
+				call	CalcVRAMAddr
+				ld	de,61
+				ld	b,8
+				xor	a
+	.cg_loop:		
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				add	hl,de
+				dec	b
+				jp	nz,.cg_loop
+				ret
+				
+; =================================================================
+; E_UPDATE_AND_DRAW_ENEMIES
+; =================================================================
+	e_update_and_draw_enemies:	
+			; --- 1. CALC CAMERA Z ---
+				ld	hl,(base_zoom)
+				srl	h
+				rr	l
+				srl	h
+				rr	l
+				srl	h
+				rr	l
+				ld	a,h
+				or	a
+				jp	z,.z_fit
+				ld	l,255
+	.z_fit:			ld	a,l
+				ld	(camera_z_pos),a
+				
+				ld	ix,enemy_data
+				ld	b,MAX_ENEMIES
+	e_draw_loop:		
+				ld	a,(ix+0)
+				or	a
+				jp	z,e_next_en_step
+				
+			; =============================================
+			; NEW: MOVEMENT LOGIC (State Machine)
+			; =============================================
+	e_process_movement:	
+			; 1. Handle Duration Timer
+				dec	(ix+9)			; MoveTimer--
+				jp	nz,.check_speed
+				
+			; Timer expired: Pick NEW Direction & Duration
+				call	e_random
+				ld	(ix+10),a		; New Random Direction Bits
+				
+				call	e_random
+				and	63			; Limit duration (0-63)
+				add	a,30			; Min duration 30 frames
+				ld	(ix+9),a		; New Timer
+				
+	.check_speed:		
+			; 2. Handle Speed Limiter
+				dec	(ix+11)			; SpeedCnt--
+				jp	nz,.skip_move		; Not time to move yet
+				
+			; Reset Speed Counter
+				ld	(ix+11),E_MOVE_SPEED
+				
+			; 3. Apply Movement based on Direction Bits
+				ld	a,(ix+10)		; Load Dir
+				
+			; Check RIGHT (Bit 0)
+				bit	0,a
+				jp	z,.chk_left
+				inc	(ix+2)			; WorldX++
+				jp	.chk_up			; Skip left check
+	.chk_left:		
+			; Check LEFT (Bit 1)
+				bit	1,a
+				jp	z,.chk_up
+				dec	(ix+2)			; WorldX--
+	.chk_up:		
+			; Check DOWN (Bit 2) - Y increases downwards
+				bit	2,a
+				jp	z,.chk_down
+				inc	(ix+1)			; WorldY++
+				jp	.skip_move		; Skip up check
+	.chk_down:		
+			; Check UP (Bit 3)
+				bit	3,a
+				jp	z,.skip_move
+				dec	(ix+1)			; WorldY--
+				
+	.skip_move:		
+			; =============================================
+			; END MOVEMENT LOGIC
+			; =============================================
+				
+			; --- 2. Z-VISIBILITY ---
+				ld	a,(camera_z_pos)
+				sub	(ix+8)
+				jp	c,e_not_vis_step
+				ld	(dist_temp),a
+				
+			; --- 3. RADAR ---
+				call	e_radar_draw
+				
+			; --- SCREEN Y ---
+				ld	a,(ix+1)
+				ld	hl,camy
+				sub	(hl)
+				cp	E_VIEW_H
+				jp	nc,e_not_vis_step
+				ld	d,a
+				
+			; --- SCREEN X ---
+				ld	a,(ix+2)
+				ld	hl,camx
+				sub	(hl)
+				;jp	c,e_not_vis_step
+				jp	z,e_not_vis_step
+				
+				cp	60			; Safe margin for Gigantic
+				jp	nc,e_not_vis_step
+				ld	e,a
+				
+			; Save position for next erase
+				ld	(ix+4),d
+				ld	(ix+5),e
+				
+				push	bc
+				push	ix
+				
+			; Load Y into H for draw routines
+				ld	h,d
+				
+			; --- 4. Z-DEPTH SELECTOR & SAVE TYPE ---
+				ld	a,(dist_temp)
+				
+				cp	48
+				jp	c,.draw_gigantic
+				
+				cp	96
+				jp	c,.draw_huge
+				
+				cp	144
+				jp	c,.draw_med
+				
+				cp	192
+				jp	c,.draw_small
+				
+			; --- DOT (Type 1) ---
+	.draw_dot:		ld	(ix+3),1
+				call	e_draw_dot
+				jp	.draw_done_no_fire
+				
+			; --- SMALL (Type 2) ---
+	.draw_small:		ld	(ix+3),2
+				call	e_draw_small
+				jp	.draw_done_no_fire
+				
+			; --- MEDIUM (Type 3) ---
+	.draw_med:		ld	(ix+3),3
+				call	e_draw_med
+				jp	.draw_done_no_fire
+				
+			; --- HUGE (Type 4) ---
+	.draw_huge:		ld	(ix+3),4
+				call	e_draw_sprite_3x6
+				jp	.draw_done
+				
+			; --- GIGANTIC (Type 5) ---
+	.draw_gigantic:		ld	(ix+3),5
+				call	e_draw_gigantic
+				
+	.draw_done:		
+			; --- LÖVÉS LOGIKA ---
+				ld	d,(ix+4)		; LastScrY (Helyes Y)
+				ld	e,(ix+5)		; LastScrX (Helyes X)
+				
+			; --- LÖVÉS LOGIKA ---
+				call	e_try_fire_bullet
+				
+	.draw_done_no_fire:	pop	ix
+				pop	bc
+				
+				jp	e_next_en_step
+				
+	e_not_vis_step:		ld	(ix+3),0
+	e_next_en_step:		ld	de,E_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,e_draw_loop
+				
+			; Radar Center (fix)
+	RENDER_RADAR_CENTER:	ld	a,15
+				ld	($AB98+647),a
+				ld	($AB98+648),a
+				ld	a,1
+				ld	($AB98+583),a
+				ld	a,8
+				ld	($AB98+584),a
+				ret
+				
+; Variables
+	camera_z_pos:		db	0
+	dist_temp:		db	0
+				
+; =================================================================
+; E_DRAW_SPRITE_ROUTINES
+; Input: H = Y, E = X
+; =================================================================
+				
+	; --- 1x2 Dot ---
+	e_draw_dot:		
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	de,enemy_sprite_dot
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				ld	bc,64
+				add	hl,bc
+				ld	a,(de)
+				ld	(hl),a
+				ret
+				
+	; --- 1x4 Small ---
+	e_draw_small:		
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	de,enemy_sprite_small
+				ld	b,4
+	.s_loop:		
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				push	bc
+				ld	bc,64
+				add	hl,bc
+				pop	bc
+				djnz	.s_loop
+				ret
+				
+	; --- 2x5 Medium ---
+	e_draw_med:		
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	de,enemy_sprite_med
+				ld	b,5
+	.s_m_loop:		
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				push	de
+				ld	de,63
+				add	hl,de
+				pop	de
+				djnz	.s_m_loop
+				ret
+				
+	; --- 3x6 Huge ---
+	e_draw_sprite_3x6:	
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	de,enemy_sprite
+				ld	b,6
+	e_spr_l:		
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				ld	a,62
+				add	a,l
+				ld	l,a
+				jp	nc,e_nc_s
+				inc	h
+	e_nc_s:			
+				djnz	e_spr_l
+				ret
+				
+	; --- 4x8 Gigantic ---
+	e_draw_gigantic:	
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	de,enemy_sprite_gigantic
+				ld	b,8
+	.g_loop:		
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				
+				push	de
+				ld	de,61
+				add	hl,de
+				pop	de
+				dec	b
+				jp	nz,.g_loop
+				ret
+				
+; =================================================================
+; E_RANDOM & DATA
+; =================================================================
+	e_random:		ld	a,r
+				ld	d,a
+				ld	a,(e_rnd_seed)
+				add	a,d
+				add	a,17
+				rrca
+				ld	(e_rnd_seed),a
+				ret
+				
+; --- PHASE 0: Dot (Z=192+) ---
+	enemy_sprite_dot:	
+				db	$F0
+				db	$F0
+				
+; --- PHASE 1: Small (Z=128-191) ---
+	enemy_sprite_small:	
+				db	$60			; .##.
+				db	$F0			; ####
+				db	$F0			; ####
+				db	$60			; .##.
+				
+; --- PHASE 2: Medium (Z=64-127) ---
+	enemy_sprite_med:	
+				db	$30, $C0		; ..## ##..
+				db	$F0, $F0		; #### ####
+				db	$C0, $30		; ##.. ..##
+				db	$F0, $F0		; #### ####
+				db	$30, $C0		; ..## ##..	
+				
+	enemy_sprite		
+; B1 (4px)  B2 (4px)  B3 (4px)
+				db	$00, $F0, $00		; .... ##.. ....
+				db	$F0, $F0, $F0		; ##.. ##.. ##..
+				db	$F0, $F0, $F0		; ##.. ##.. ##..
+				db	$F0, $00, $F0		; ##.. .... ##.. (window)
+				db	$F0, $F0, $F0		; ##.. ##.. ##..
+				db	$00, $F0, $00		; .... ##.. ....
+				
+; --- FÁZIS 4: GIGANTIC (Z=0-47) ---
+	enemy_sprite_gigantic:	
+				db	$00, $70, $E0, $00	; .... .### ###. ....
+				db	$70, $F0, $F0, $E0	; .### #### #### ###.
+				db	$F0, $F0, $F0, $F0	; #### #### #### ####
+				db	$F0, $10, $80, $F0	; #### ...# #... ####
+				db	$F0, $10, $80, $F0	; #### ...# #... ####
+				db	$F0, $F0, $F0, $F0	; #### #### #### ####
+				db	$F0, $F0, $F0, $F0	; #### #### #### ####
+				db	$00, $70, $E0, $00	; .... .### ###. ....
+				
+	enemy_data:		equ	ENEMY_DATA_ADDR
+	e_rnd_seed:		db	0
+	num_of_living_enemies	db	TOTAL_ENEMIES
+	num_of_enemies_reborn	db	ENEMY_REBORN_COUNTER
+				
+; =================================================================
+; RADAR ALRENDSZER (Külön rutinok)
+; =================================================================
+				
+; Radar törlése a mentett koordináták alapján
+	e_radar_erase:		
+				ld	a,(ix+7)		; Mentett Radar X
+				cp	16			; Csak 0-15 érvényes
+				ret	nc			; Ha 255 (vagy kint van), ne csináljon semmit!
+				
+				ld	d,(ix+6)		; D = Mentett Radar Y
+				ld	e,a			; E = Mentett Radar X
+				
+				push	bc
+				push	ix			; IX-et is mentjük a biztonság kedvéért
+				call	e_radar_calc_addr	; HL = VRAM cím
+				ld	(hl),0			; TÖRLÉS ($00)
+				pop	ix
+				pop	bc
+				
+				ld	(ix+7),255		; Törlés után "érvénytelenítjük" a pozíciót
+				ret
+				
+; Radar rajzolása az aktuális WorldX/Y alapján
+	e_radar_draw		
+				ld	a,(ix+1)		; WorldY
+				ld	hl,camy
+				sub	(hl)			; Relatív Y
+				rrca				; /2
+				rrca				; /4
+				rrca				; /8
+				and	$1F			; Maszkoljuk a felső 3 bitet (szemetet)
+				
+				cp	17			; radar magassága
+				jr	nc,e_rad_off
+				ld	d,a			; D = Radar Y
+				
+				ld	a,(ix+2)		; WorldX
+				ld	hl,camx
+				sub	(hl)			; Relatív X
+				rrca				; /2
+				rrca				; /4
+				and	$3F			; Maszkoljuk a felső 2 bitet
+				
+				cp	16			; X marad 16
+				jr	nc,e_rad_off
+				ld	e,a			; E = Radar X
+				
+				ld	(ix+6),d
+				ld	(ix+7),e
+				
+				push	bc
+				push	ix
+				call	e_radar_calc_addr
+				ld	(hl),$F0
+				pop	ix
+				pop	bc
+				ret
+				
+	e_rad_off		
+				ld	(ix+7),255
+				ret
+				
+	e_radar_calc_addr:	
+				; HL = D * 64
+				ld	l,d
+				ld	h,0
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl			; HL = Y * 64
+				
+				ld	bc,$AB98		; Radar báziscíme
+				add	hl,bc			; HL = Sor eleje
+				
+				ld	b,0
+				ld	c,e			; BC = X eltolás
+				add	hl,bc			; HL = Pontos cím
+				ret
+				
+; =================================================================
+;				
+; ENEMY FIRING SYSTEM
+;
+; =================================================================				
+	MAX_E_BULLETS		equ	6			; Maximum 6 lövedék (3 páros)
+	EB_STRUCT_SIZE		equ	12			; 12 bájt / lövedék
+				
+; --- E_BULLET STRUKTÚRA ---
+; +0: Status (1=Aktív)
+; +1: WorldY (Pixel - High byte)
+; +2: WorldY (Sub-pixel - Low byte)
+; +3: WorldX (Pixel - High byte)
+; +4: WorldX (Sub-pixel - Low byte)
+; +5: Velocity Y (Fixpontos)
+; +6: Velocity X (Fixpontos)
+; +7: Velocity X (Sub-pixel)
+; +8: Velocity Y (Sub-pixel)
+; +9: (Reserved / Padding)
+; +10: Last Screen Y (A törléshez)
+; +11: Last Screen X (A törléshez)			
+				
+	e_bullet_data:		equ	E_BULLET_DATA_ADDR
+	e_shot_timer:		db	0			; Globális cooldown, hogy ne lőjön mindenki egyszerre	
+	saved_bullet_ptr:	dw	0
+				
+; =================================================================
+; E_BULLET_SYSTEM_INIT
+; Inicializálja a lövedék rendszert (Törli a memóriát + Timer)
+; =================================================================
+	e_bullet_system_init:	
+			; 1. Adatterület nullázása (LDIR módszerrel a leggyorsabb/legegyszerűbb blokkban)
+				ld	hl,e_bullet_data	; Forrás (a tömb eleje)
+				ld	(hl),0			; Az első bájtot kinullázzuk
+				
+				ld	de,e_bullet_data+1	; Cél (a tömb második bájtja)
+				ld	bc,(MAX_E_BULLETS*EB_STRUCT_SIZE)-1; Hossz - 1
+				
+				ldir				; A Z80 másolja a 0-t végig a memórián
+				
+			; 2. Shot Timer beállítása
+			; Adunk egy kis "türelmi időt" (pl. 50 frame), hogy
+			; ne azonnal lőjön az ellenség, amint megjelenik a kép.
+				ld	a,50
+				ld	(e_shot_timer),a
+				
+				ret
+				
+; =================================================================
+; E_TRY_FIRE_ENEMY
+; Input: IX = Enemy Pointer
+; Input: D = Enemy Screen Y, E = Enemy Screen X
+; =================================================================
+	e_try_fire_bullet:	
+				ld	a,(e_shot_timer)
+				or	a
+				ret	nz
+				
+				ld	a,(ix+8)		; Check Z depth
+				cp	220
+				ret	nc
+				
+				ld	a,r
+				and	$03			; Modified: 25% chance (less aggressive)
+				ret	nz
+				
+			; --- FIND FREE SLOTS ---
+				push	de			; Save Enemy Screen Coords
+				
+				ld	iy,e_bullet_data
+				ld	b,MAX_E_BULLETS
+				ld	c,0
+				
+				xor	a
+				ld	(saved_bullet_ptr),a
+				ld	(saved_bullet_ptr+1),a
+				
+	.find_loop:		
+				ld	a,(iy+0)
+				or	a
+				jp	nz,.next_slot
+				
+			; Empty slot found
+				inc	c
+				ld	a,c
+				cp	1
+				jp	z,.found_first
+				cp	2
+				jp	z,.found_second
+				
+	.found_first:		
+				ld	(saved_bullet_ptr),iy
+				jp	.next_slot
+				
+	.found_second:		
+				jp	.init_bullets		; Found 2 slots -> Go to Init
+				
+	.next_slot:		
+				ld	de,EB_STRUCT_SIZE
+				add	iy,de
+				dec	b
+				jp	nz,.find_loop
+				
+				pop	de			; Restore stack if no slots found
+				ret
+				
+; --- INIT BULLETS (Missing Logic Restored) ---
+	.init_bullets:		
+				pop	de			; Visszaszerezzük a mentett ScreenY, ScreenX-et
+				
+			; --- Biztonsági ellenőrzés: Túl alacsonyan van? ---
+				ld	a,146
+				sub	d
+				ret	c			; Ha ScreenY > 146, kilépünk
+				
+			; =================================================
+			; VEKTOR SZÁMÍTÁS (Célpont: X=32, Y=146)
+			; =================================================
+				
+			; --- Y Sebesség (BC) ---
+				ld	a,146			; Cél Y
+				sub	d			; Cél - Ellenség
+				ld	c,a
+				ld	b,0
+				bit	7,a
+				jp	z,.y_pos
+				ld	b,$FF			; Előjel kiterjesztés (negatívnál)
+	.y_pos:			
+				sla	c			; Szorzás 4-gyel (Shift Left 2)
+				rl	b
+				sla	c
+				rl	b
+				
+			; --- X Sebesség (HL) ---
+				ld	a,32			; Cél X
+				sub	e			; Cél - Ellenség
+				ld	l,a
+				ld	h,0
+				bit	7,a
+				jp	z,.x_pos
+				ld	h,$FF			; Előjel kiterjesztés
+	.x_pos:			
+				add	hl,hl			; Szorzás 4-gyel
+				add	hl,hl
+				
+			; =================================================
+			; LÖVEDÉKEK AKTIVÁLÁSA
+			; =================================================
+				
+				ld	a,255
+				ld	(ENEMY_FX_TYPE),a	; Hang effekt
+				
+			; --- 1. LÖVEDÉK (Jobbra tart) ---
+				push	hl			; Eredeti X sebesség mentése
+				push	de
+				ld	de,20			; Szórás mértéke
+				add	hl,de			; X sebesség + 20
+				pop	de
+				
+				call	.setup_bullet_data	; Minden adat beállítása (BC, HL, DE alapján)
+				
+				pop	hl			; Eredeti X sebesség visszatöltése
+				
+			; --- 2. LÖVEDÉK (Balra tart) ---
+				ld	iy,(saved_bullet_ptr)	; Váltás a másik szabad helyre
+				push	de
+				ld	de,20
+				or	a			; Carry törlése
+				sbc	hl,de			; X sebesség - 20
+				pop	de
+				
+				call	.setup_bullet_data	; Beállítás
+				
+				ld	a,30
+				ld	(e_shot_timer),a
+				ret
+				
+; =================================================================
+; SETUP BULLET DATA (Javított, Egységesített)
+; Input: IY = Bullet Pointer
+; Input: D, E = Screen Y, Screen X (Ellenség helye)
+; Input: BC = Velocity Y
+; Input: HL = Velocity X
+; =================================================================
+	.setup_bullet_data:	
+				ld	(iy+0),1		; Status = Aktív
+				
+			; --- POZÍCIÓ SZÁMÍTÁS ---
+			; WorldY = CamY + ScreenY
+			; Figyelem: A (camy) betöltése feltételezi, hogy a pálya 256px magas (wrap)
+			; vagy a camy a megfelelő byte-ot tartalmazza.
+				ld	a,(camy)
+				add	a,d
+				ld	(iy+1),a		; WorldY High (Pixel)
+				ld	(iy+2),0		; WorldY Low (Subpixel)
+				
+			; WorldX = CamX + ScreenX
+				ld	a,(camx)
+				add	a,e
+				ld	(iy+3),a		; WorldX High
+				ld	(iy+4),0		; WorldX Low
+				
+			; --- SEBESSÉG MENTÉS (Most már egységes!) ---
+			; Velocity Y (BC)
+				ld	(iy+5),b		; Vel Y High
+				ld	(iy+6),c		; Vel Y Low
+				
+			; Velocity X (HL) - EZ HIÁNYZOTT a régi setup-ból!
+				ld	(iy+7),h		; Vel X High
+				ld	(iy+8),l		; Vel X Low
+				
+				ld	(iy+10),255		; Force redraw flag
+				ret
+				
+; =================================================================
+; E_UPDATE_BULLETS
+; =================================================================
+	e_update_and_draw_bullets:	
+				ld	ix,e_bullet_data
+				ld	b,MAX_E_BULLETS
+	.b_loop:		
+				ld	a,(ix+0)
+				or	a
+				jp	z,.b_next
+				
+; --- MOZGÁS ---
+				ld	l,(ix+2)
+				ld	h,(ix+1)
+				ld	e,(ix+6)
+				ld	d,(ix+5)
+				add	hl,de
+				ld	(ix+1),h
+				ld	(ix+2),l
+				
+				ld	l,(ix+4)
+				ld	h,(ix+3)
+				ld	e,(ix+8)
+				ld	d,(ix+7)
+				add	hl,de
+				ld	(ix+3),h
+				ld	(ix+4),l
+				
+; --- CHECK ÉS MENTÉS ---
+				
+; Y Számítása
+				ld	a,(ix+1)
+				ld	hl,camy
+				sub	(hl)
+				
+; Szigorú határ a műszerfal miatt (146)
+				cp	146
+				jp	nc,.check_hit_conditions
+				
+				ld	d,a			; D = Screen Y
+				
+; X Számítása
+				ld	a,(ix+3)
+				ld	hl,camx
+				sub	(hl)
+				;jp	c,.b_kill
+				jp	z,.b_kill
+				cp	63
+				jp	nc,.b_kill
+				
+				ld	e,a			; E = Screen X
+				
+; --- KRITIKUS JAVÍTÁS: KOORDINÁTÁK MENTÉSE ---
+; Mielőtt rajzolunk, elmentjük a struktúrába, 
+; hogy a következő Erase pontosan ugyanezt tudja törölni.
+				ld	(ix+10),d		; Save Screen Y
+				ld	(ix+11),e		; Save Screen X
+				
+; --- DRAW ---
+				push	bc
+				push	ix
+				
+				ld	h,d
+				ld	d,$84
+				
+				call	CalcVRAMAddr
+				
+				ld	(hl),$F0
+				
+				pop	ix
+				pop	bc
+				jp	.b_next
+; --- HIT LOGIC CHECK ---
+	.check_hit_conditions:	
+			; We are at Y >= 146. Now check if X is within [30..34]
+				
+			; Calculate Screen X (needs to be recalculated here)
+				ld	a,(ix+3)
+				ld	hl,camx
+				sub	(hl)
+				
+			; Check Min X (24)
+				cp	24
+				jp	c,.b_kill		; If X < 24, it is a miss
+				
+			; Check Max X (40)
+				cp	41
+				jp	nc,.b_kill		; If X >= 41, it is a miss
+				
+			; If we are here, X is between 24 and 40 -> HIT!
+				jp	.on_hit
+				
+; --- HIT HANDLER ---
+	.on_hit:		
+			; We must save B and IX because they are used by the loop
+				push	bc
+				push	ix
+				
+				call	handling_hit
+				
+				pop	ix
+				pop	bc
+				
+			; Fall through to .b_kill to remove the bullet
+				
+	.b_kill:		
+				ld	(ix+0),0
+	.b_next:		
+				ld	de,EB_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,.b_loop
+				ret
+				
+				
+; =================================================================
+; E_ERASE_BULLETS
+; =================================================================
+	e_erase_bullets:	
+				ld	ix,e_bullet_data
+				ld	b,MAX_E_BULLETS
+	.eb_loop:		
+				ld	a,(ix+0)
+				or	a
+				jp	z,.eb_next
+				
+			; --- JAVÍTÁS: MENTETT POZÍCIÓ BETÖLTÉSE ---
+			; Nem vonunk ki camy-t, nem számolunk!
+				
+				ld	a,(ix+10)		; Last Screen Y
+				cp	255			; Ha 255, akkor ez egy új golyó, még nem volt rajzolva
+				jp	z,.eb_next
+				
+				ld	d,a			; D = Törlési Y
+				
+				ld	e,(ix+11)		; E = Törlési X (Last Screen X)
+				
+			; --- TÖRLÉS ---
+			; Itt már nem kell check, mert ha elmentettük, 
+			; akkor biztosan érvényes volt a rajzoláskor.
+				push	bc
+				push	ix
+				
+				ld	h,d
+				ld	d,$84
+				call	CalcVRAMAddr
+				ld	(hl),0
+				
+				pop	ix
+				pop	bc
+				
+	.eb_next:		
+				ld	de,EB_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,.eb_loop
+				ret
+				
+; =================================================================
+; AMMO SYSTEM (Prefix: a_)
+; =================================================================
+				
+	MAX_AMMO		equ	8
+	A_STRUCT_SIZE		equ	6			; Bytes per ammo
+	A_VIEW_W		equ	64			; Screen width (bytes)
+	A_VIEW_H		equ	134			; Screen height (lines)
+	ZOOM_LIMIT		equ	2000			; Minimum zoom to see ammo
+				
+; --- STRUCTURE OFFSETS ---
+; +0: Status (1=Active, 0=Used/Inactive)
+; +1: WorldY (0-255)
+; +2: WorldX (0-255)
+; +3: WasVisible (Flag for erase logic 1=Yes, 0=No)
+; +4: LastScrY (Screen Y for erasing)
+; +5: LastScrX (Screen X for erasing)
+				
+; =================================================================
+; A_INIT_AMMO
+; Initialize 8 random ammo locations
+; =================================================================
+	a_init_ammo:		
+				ld	ix,ammo_data
+				ld	b,MAX_AMMO
+				xor	a
+				ld	c,a			; C register tracks the Sector Base X (0, 32, 64...)
+				
+	a_init_loop:		
+				ld	(ix+0),1		; Set Status = Active
+				
+			; --- Y Coordinate (Keep fully random) ---
+				push	bc			; Save Sector Counter & Base
+				call	e_random
+				ld	(ix+1),a		; WorldY (0-255)
+				
+			; --- X Coordinate (Sector Jitter) ---
+			; Logic: X = (LoopIndex * 32) + Random(0..31)
+				call	e_random
+				and	31			; Mask to 0-31 range (jitter within sector)
+				
+				pop	bc			; Restore C (Sector Base)
+				add	a,c			; A = Base + Jitter
+				ld	(ix+2),a		; WorldX
+				
+			; --- Advance Sector for next item ---
+				ld	a,c
+				add	a,32			; Step to next 32-pixel sector
+				ld	c,a
+				
+			; --- Reset Vars ---
+				ld	(ix+3),0		; WasVisible = 0
+				
+				ld	de,A_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,a_init_loop
+				ret
+				
+; =================================================================
+; A_ERASE_OLD_AMMO
+; Must be called every frame before drawing
+; =================================================================
+	a_erase_old_ammo:	
+				ld	ix,ammo_data
+				ld	b,MAX_AMMO
+	a_erase_loop:		
+			; Check if it was visible last frame
+				ld	a,(ix+3)
+				or	a
+				jp	z,a_next_erase		; If 0, nothing to erase
+				
+				ld	h,(ix+4)		; Load LastScrY
+				ld	e,(ix+5)		; Load LastScrX
+				
+				push	bc
+				ld	d,$84			; Base VRAM segment
+				call	a_clr_sprite		; Clear the 4x8 sprite
+				pop	bc
+				
+				ld	(ix+3),0		; Reset visible flag
+				
+	a_next_erase:		
+				ld	de,A_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,a_erase_loop
+				ret
+				
+; =================================================================
+; A_UPDATE_AND_DRAW_AMMO
+; Handles visibility checks and rendering
+; =================================================================
+	a_update_and_draw_ammo:	
+			; --- 1. ZOOM CHECK ---
+			; Only visible if base_zoom > 2000
+				ld	hl,(base_zoom)
+				ld	de,ZOOM_LIMIT
+				or	a			; Clear carry
+				sbc	hl,de
+			; If Carry is set (HL < DE), zoom is too low
+				jp	c,a_skip_all_draw
+				
+				ld	ix,ammo_data
+				ld	b,MAX_AMMO
+				
+	a_draw_loop:		
+			; --- 2. ACTIVE STATUS CHECK ---
+				ld	a,(ix+0)
+				or	a
+				jp	z,a_next_ammo_step	; If 0 (Inactive), skip
+				
+			; --- 3. SCREEN Y CALC ---
+				ld	a,(ix+1)		; Object Y
+				ld	hl,camy
+				sub	(hl)			; A = ObjY - CamY
+				cp	A_VIEW_H
+				jp	nc,a_next_ammo_step	; Off screen Y
+				ld	d,a			; Save Screen Y in D
+				
+			; --- 4. SCREEN X CALC ---
+				ld	a,(ix+2)		; Object X
+				ld	hl,camx
+				sub	(hl)			; A = ObjX - CamX
+				;jp	c,a_next_ammo_step	; Off screen X
+				jp	z,a_next_ammo_step	; Off screen X
+				
+			; Margin check (sprite is 4 bytes wide)
+				cp	60
+				jp	nc,a_next_ammo_step
+				ld	e,a			; Save Screen X in E
+				
+			; --- 5. RENDER ---
+			; Save render coords for next frame erase
+				ld	(ix+4),d
+				ld	(ix+5),e
+				ld	(ix+3),1		; Set WasVisible = 1
+				
+				push	bc
+				push	ix
+				
+				ld	h,d			; H = Y coordinate
+				ld	d,$84			; VRAM Base
+				call	a_draw_sprite		; Draw the sprite
+				
+				pop	ix
+				pop	bc
+				
+	a_next_ammo_step:	
+				ld	de,A_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,a_draw_loop
+				
+	a_skip_all_draw:	
+				ret
+				
+; =================================================================
+; GRAPHICS ROUTINES
+; Input: H = Y, E = X, D = $84
+; =================================================================
+				
+	; --- Draw 4x8 Ammo Sprite ---
+	a_draw_sprite:		
+				call	CalcVRAMAddr		; External routine expected
+				ld	de,ammo_sprite_gfx
+				ld	b,8			; Height
+	.draw_l:		
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				
+				ld	a,(de)
+				ld	(hl),a
+				inc	hl
+				inc	de
+				
+				ld	a,(de)
+				ld	(hl),a
+				inc	de
+				
+			; Next Line
+				push	de
+				ld	de,61			; Screen width (64) - Sprite width (3) drawn by inc
+				add	hl,de
+				pop	de
+				dec	b
+				jp	nz,.draw_l
+				ret
+				
+	; --- Clear 4x8 Ammo Sprite ---
+	a_clr_sprite:		
+				call	CalcVRAMAddr
+				ld	de,61
+				ld	b,8
+				xor	a
+	.clr_l:			
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				inc	hl
+				ld	(hl),a
+				add	hl,de
+				dec	b
+				jp	nz,.clr_l
+				ret
+				
+; =================================================================
+; A_CHECK_CROSSHAIR_COLLISION				
+; =================================================================
+	a_check_crosshair_collision:	
+				ld	a,(ammo)		; pick up ammo is available if ammo is not full
+				cp	255
+				ret	z
+				
+				ld	ix,ammo_data
+				ld	b,MAX_AMMO
+				
+	acc.loop:		
+			; --- 1. Check if Active ---
+				ld	a,(ix+0)
+				or	a
+				jp	z,acc.next_item
+				
+			; --- 2. Check if Visible ---
+			; We only hit things that are drawn on screen
+				ld	a,(ix+3)
+				or	a
+				jp	z,acc.next_item
+				
+			; --- 3. Check X Collision ---
+			; Crosshair X (32) must be within [AmmoX ... AmmoX+3]
+			; Logic: 32 - AmmoX must be < 4 (0, 1, 2, 3)
+				ld	a,32			; Crosshair X
+				sub	(ix+5)			; LastScrX
+				cp	4			; Sprite Width (bytes)
+				jp	nc,acc.next_item	; If Carry Clear (Result >= 4), No Hit
+				
+			; --- 4. Check Y Collision ---
+			; Crosshair Y (92) must be within [AmmoY ... AmmoY+7]
+			; Logic: 92 - AmmoY must be < 8
+				ld	a,92			; Crosshair Y
+				sub	(ix+4)			; LastScrY
+				sub	15
+				cp	8			; Sprite Height (lines)
+				jp	nc,acc.next_item	; If Carry Clear (Result >= 8), No Hit
+				
+			; --- HIT FOUND! ---
+				ld	(ix+0),0		; Deactivate AMMO immediately!
+								; (ix+3) is left as 1, so erase routine 
+								; will automatically clear graphics next frame.
+				ld	a,(ammo)
+				add	a,AMMO_INCREMENT
+				jp	nc,acc.skip_limit	; Jump if No Carry (Result <= 255)
+				
+				ld	a,255			; Clamp to 255 if Carry set
+	acc.skip_limit:		
+				ld	(ammo),a
+				
+				ld	a,100			; add 2550 to score on pick up ammo
+				call	add_to_score
+				
+				ld	hl,DIGI_BIP_SOUND_ADDR	; play short digi sound on pick up ammo
+				ld	de,257
+				ld	c,1			; graphics 4
+				call	PLAY_DIGI_SOUND		; PLAY DIGI SOUND
+				ret
+				
+	acc.next_item:		
+				ld	de,A_STRUCT_SIZE
+				add	ix,de
+				dec	b
+				jp	nz,acc.loop
+				
+				ret
+				
+; =================================================================
+; AMMO SYSTEM DATA SECTION
+; =================================================================
+				
+; Sprite Data (4 bytes wide, 8 lines high)
+; Centered the 16-pixel ASCII art within the 32-pixel (4 byte) width
+; Pattern: 00 XX XX 00
+	ammo_sprite_gfx:	
+			; Row 0: .##############.
+				db	$70, $F0, $F0, $E0
+			; Row 1: #..###..#...#.##
+				db	$90, $C0, $80, $B0
+			; Row 2: #.#...#.##.##.##
+				db	$A0, $20, $D0, $B0
+			; Row 3: #.#####.#.#.#.##
+				db	$B0, $E0, $A0, $B0
+			; Row 4: #.#...#.#...#.##
+				db	$A0, $20, $80, $B0
+			; Row 5: #.#...#.#...#.##
+				db	$A0, $20, $80, $B0
+			; Row 6: ################
+				db	$F0, $F0, $F0, $F0
+			; Row 7: .##############.
+				db	$70, $F0, $F0, $E0
+				
+; Memory storage for 8 ammo items (8 * 6 bytes = 48 bytes)
+	ammo_data:		equ	AMMO_DATA_ADDR
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di    ; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS1		; no more bits left?
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jp	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2EV		; no more bits left?
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2OD		; no more bits left?
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jp	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS5		; no more bits left?
+				ccf
+				jp	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jp	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jp	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jp	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jp	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------
+; GAME OVER PROCESS				
+;--------------------------------------------------------------------------------------------------------------------
+	game_over:		di
+				xor	a			; MUTE SOUND generator
+				out	(4),a
+				out	(5),a
+				
+				ld	a,8			; dark red border
+				out	(0),a
+				ld	a,4			; dark red background color
+				out	($60),a
+; visual and sound effect				
+				ld	de,PIC_TITLE_ZX7	; final explosion sound and visual effect
+				ld	b,60
+	goe_loop:		ld	a,(de)
+				and	b
+				or	1
+				out	(6),a			; white noise to 4 bit DA converter
+				ld	a,12			; random video memory start address
+				out	(112),a
+				ld	a,(de)
+				and	16
+				out	(113),a
+				ld	a,13
+				out	(112),a
+				inc	de
+				ld	a,(de)
+				out	(113),a
+				inc	de
+				ld	a,64
+	goe_cn0:		dec	a
+				jp	nz,goe_cn0
+	goe_cnt:		ld	a,100
+				dec	a
+				ld	(goe_cnt+1),a
+				jp	nz,goe_loop
+				ld	a,100
+				ld	(goe_cnt+1),a
+				djnz	goe_loop
+				
+				ld	a,12			; restore video memory start address
+				out	(112),a
+				xor	a
+				out	(113),a
+				ld	a,13
+				out	(112),a
+				xor	a
+				out	(113),a
+; end of visual and sound effect				
+				call	CRTC_DISABLE
+				xor	a
+				out	(0),a
+				
+				ld	a,2			; 16 color mode
+				out	(6),A
+				ld	(GR_MODE+1),a
+				
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	bc,3539			; copy zx7 resource to U3 page
+				ld	hl,GAMEOVER_PIC_ZX7
+				ld	de,$c000
+				ldir
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	hl,$c000		; decompress picture to video ram
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,DIGI_GAMEOVER	; prepare DIGI SOUND
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				ld	hl,MUSIC_DATA
+				ld	de,2780
+				ld	c,2			; graphics 16
+				di
+				call	PLAY_DIGI_SOUND		; PLAY DIGI SOUND				
+				
+				ld	hl,MUSIC_FUNERAL_ZX7	; decompress music
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				ld	bc,0			; setup parameters for GAME OVER MUSIC
+				ld	(CH1_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH2_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH1_VOLUME+1),a
+				ld	a,$04
+				ld	(CH2_VOLUME+1),a
+				ld	a,$14
+				ld	(CH3_VOLUME+1),a
+				
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR and MUSIC PLAYER INTERRUPT
+				
+	gamov:			halt
+				
+				ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	z,gamov_over
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,gamov
+				
+				
+	gamov_over:		call	STOP_MUSIC_MIXER
+				jp	highscore
+				
+;--------------------------------------------------------------------------------------------------------------------
+; REWARD PROCESS				
+;--------------------------------------------------------------------------------------------------------------------
+	reward:			di
+				xor	a			; MUTE SOUND generator
+				out	(4),a
+				out	(5),a
+				out	(0),a
+				call	CRTC_DISABLE
+				
+				ld	a,2			; 16 color mode
+				out	(6),A
+				ld	(GR_MODE+1),a
+				
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	bc,4815			; copy zx7 resource to U3 page
+				ld	hl,REWARD_PIC_ZX7
+				ld	de,$c000
+				ldir
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	hl,$c000		; decompress picture to video ram
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,DIGI_REWARD		; prepare DIGI SOUND
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				ld	hl,MUSIC_DATA
+				ld	de,5831
+				ld	c,2			; graphics 16
+				di
+				call	PLAY_DIGI_SOUND		; PLAY DIGI SOUND				
+				
+				ld	hl,MUSIC_DATA_ZX7	; decompress music
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				
+				ld	bc,16			; setup parameters for GAME OVER MUSIC
+				ld	(CH1_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH2_VOL_RELEASE+1),bc
+				ld	bc,16
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH1_VOLUME+1),a
+				ld	a,$0C
+				ld	(CH2_VOLUME+1),a
+				ld	a,$10
+				ld	(CH3_VOLUME+1),a
+				
+				call	START_MUSIC_MIXER
+				
+	rew_wt1:		halt
+				ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$E5
+				jp	nz,rew_frame_cnt
+				ld	a,(MUSICPOS+1)
+				cp	$80
+				jp	c,rew_frame_cnt
+				
+				ld	bc,ADSR_CH_03
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$10
+				ld	(CH3_VOLUME+1),a
+				ld	hl,10000
+				ld	(rew_frame_cnt+1),hl
+				ld	HL,MUSIC_DATA-1		; RESTART music
+				ld	(MUSICPOS+1),HL
+				
+	rew_frame_cnt:		ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$D2
+				jp	nz,rew_key_check
+				ld	a,(MUSICPOS+1)
+				cp	$40
+				jp	c,rew_key_check
+				ld	bc,ADSR_CH_03_2
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH3_VOLUME+1),a
+				
+	rew_key_check:		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	z,rew_over
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,rew_wt1
+				
+	rew_over:		call	STOP_MUSIC_MIXER
+				jp	highscore
+				
+;--------------------------------------------------------------------------------------------------------------------
+; ESCAPED from the GAME
+;--------------------------------------------------------------------------------------------------------------------
+	escaped:		di
+				xor	a			; MUTE SOUND generator
+				out	(4),a
+				out	(5),a
+				out	(0),a
+				xor	a			; fekete
+				out	($60),A
+				out	($61),A
+				out	($62),A
+				out	($63),A
+				
+;--------------------------------------------------------------------------------------------------------------------
+; HIGHSCORE PROCESS
+;--------------------------------------------------------------------------------------------------------------------
+	highscore:		call	INIT_NO_IRQ
+				halt
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				call	CLS
+				xor	a			; fekete
+				out	($60),A
+				out	($61),A
+				out	($62),A
+				out	($63),A
+				ld	a,1			; 4 color mode
+				out	(6),A
+				ld	(GR_MODE+1),a
+				
+				ld	hl,TITLE_PIC_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	COPYRIGHT_TEXT
+				call	CRTC_ENABLE
+				call	LOAD_CREDIT_MUSIC
+				call	START_MUSIC_MIXER
+				halt
+				halt
+				halt
+				halt
+				halt
+				ld	A,$55			; fehér
+				out	($61),A
+				ld	A,$45			; lila
+				out	($62),A
+				ld	A,$54			; sárga 
+				out	($63),A
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	a,$00			; normal color		
+				ld	(color_and_value_1),a
+				ld	(color_and_value_1+1),a
+				ld	(color_and_value_1+2),a
+				ld	(color_and_value_1+3),a
+				ld	(color_and_value_2),a
+				ld	(color_and_value_2+1),a
+				ld	(color_and_value_2+2),a
+				ld	(color_and_value_2+3),a
+				ld	BC,$0108		; 1. oszlop, 8. sor
+				call	RST30DB3
+				ld	DE,gratu_szoveg		;szöveg címe
+				call	RST30DB2
+				ld	BC,$010B
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 33
+				call	RST30DB2
+				ld	BC,$010D
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 2*33
+				call	RST30DB2
+				ld	BC,$010E
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 3*33
+				call	RST30DB2
+				ld	BC,$010F
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 4*33
+				call	RST30DB2
+				ld	BC,$0110
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 5*33
+				call	RST30DB2
+				ld	BC,$0111
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 6*33
+				call	RST30DB2
+				ld	BC,$0112
+				call	RST30DB3
+				ld	DE,gratu_szoveg + 7*33
+				call	RST30DB2
+				
+; display result highscore		
+				ld	a,(shield)		; the shield condition increasing the highscore
+				call	add_to_score
+				call	score_to_str
+				
+				ld	a,$07			; extra color
+				ld	(color_and_value_1),a
+				ld	(color_and_value_1+1),a
+				ld	(color_and_value_1+2),a
+				ld	(color_and_value_1+3),a
+				ld	(color_and_value_2),a
+				ld	(color_and_value_2+1),a
+				ld	(color_and_value_2+2),a
+				ld	(color_and_value_2+3),a
+				ld	BC,$130B
+				call	RST30DB3
+				ld	DE,scoreSTR-1
+				call	RST30DB2
+				
+				xor	a
+				ld	(score1),a
+				ld	(score2),a
+				ld	(score3),a
+				
+	hs_msc_cnt:		halt
+				ld	a,(MUSICPOS+2)		; control last frame after restarting the music
+				cp	$D2
+				jp	nz,hs_chk_key
+				ld	a,(MUSICPOS+1)
+				cp	$A0
+				jp	c,hs_chk_key
+				
+				jp	full_restart
+				
+	hs_chk_key:		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE is pressed
+				jp	Z,full_restart
+				
+				ld	A,8			; check the FIRE on joystick
+				out	(3),A			; select 8th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check FIRE is pressed
+				jp	NZ,hs_msc_cnt
+				
+				jp	full_restart
+				
+;--------------------------------------------------------------------------------------------------------------------
+; rezonance music
+;--------------------------------------------------------------------------------------------------------------------
+	rezonance_LOGO:		di
+				xor	a			; MUTE SOUND generator
+				out	(4),a
+				out	(5),a
+				out	(0),a
+				call	CRTC_DISABLE
+				
+				ld	a,1			; 4 color mode
+				out	(6),A
+				ld	(GR_MODE+1),a
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	bc,550			; copy zx7 resource to U3 page
+				ld	hl,LOGO_PIC_ZX7
+				ld	de,$c000
+				ldir
+				
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+				ld	hl,$c000		; decompress picture to video ram
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				ld	A,$B0			; lapozási kód: U0, U1, U2, U3
+				out	($02),a			; Belapozás
+				ld	hl,REZONANCE_MUSIC
+				ld	bc,86
+				ld	de,MUSIC_DATA
+				ldir
+				ld	bc,0			; setup parameters for FAF LOGO REZONANCE SOUND
+				ld	(CH1_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH2_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH1_VOLUME+1),a
+				ld	a,$14
+				ld	(CH2_VOLUME+1),a
+				ld	a,$14
+				ld	(CH3_VOLUME+1),a
+				
+				call	CRTC_ENABLE
+				call	START_MUSIC_MIXER
+				
+				ld	bc,16000
+	logo_f_wait:		halt
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,logo_f_wait
+				
+				
+				ld	a,24
+				ld	(volcounter+1),a
+	vegtel:			halt
+	volcounter:		ld	a,24
+				sub	4
+				ld	(volcounter+1),a
+				ld	(CH1_VOLUME+1),a
+				ld	(CH2_VOLUME+1),a
+				ld	(CH3_VOLUME+1),a
+				jp	z,logo_END
+				
+				ld	bc,255
+	littlewait:		halt
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,littlewait
+				jp	vegtel
+				
+	logo_END:		call	STOP_MUSIC_MIXER
+				call	CRTC_DISABLE
+				ld	bc,$16			; setup parameters for MAIN TITLE MUSIC
+				ld	(CH1_VOL_RELEASE+1),bc
+				ld	bc,0
+				ld	(CH2_VOL_RELEASE+1),bc
+				ld	bc,$16
+				ld	(CH3_VOL_RELEASE+1),bc
+				ld	a,$14
+				ld	(CH1_VOLUME+1),a
+				ld	a,$C
+				ld	(CH2_VOLUME+1),a
+				ld	a,$10
+				ld	(CH3_VOLUME+1),a
+				ld	a,2			; 16 color mode
+				out	(6),A
+				ld	(GR_MODE+1),a
+				
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------
+				
+; definition of music data record elements
+; musical sounds C1-C8	
+				
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	64
+	E6			equ	65
+	F6			equ	66
+	FISZ6			equ	67
+	G6			equ	68
+	GISZ6			equ	69
+	A6			equ	70
+	AISZ6			equ	71
+	B6			equ	72
+				
+	C7			equ	73
+	CISZ7			equ	74
+	D7			equ	75
+	DISZ7			equ	76
+	E7			equ	77
+	F7			equ	78
+	FISZ7			equ	79
+	G7			equ	80
+	GISZ7			equ	81
+	A7			equ	82
+	AISZ7			equ	83
+	B7			equ	84
+				
+	C8			equ	85
+				
+; definition of control codes	
+	MUTE			equ	86			; 0 Hz	channel is muted
+	SKIP			equ	$fe			; channel is skipped (previous sound continues)
+				
+	FRQINC00		equ	87			; increase freq const by 256
+	FRQINC01		equ	88			; increase freq const by 16
+	FRQINC02		equ	89			; increase freq const by 32
+	FRQINC03		equ	90			; increase freq const by 48
+	FRQINC04		equ	91			; increase freq const by 64
+	FRQINC05		equ	92			; increase freq const by 80
+	FRQINC06		equ	93			; increase freq const by 96
+	FRQINC07		equ	94			; increase freq const by 112
+	FRQINC08		equ	95			; increase freq const by 128
+	FRQINC09		equ	96			; increase freq const by 144
+	FRQINC0A		equ	97			; increase freq const by 160
+	FRQINC0B		equ	98			; increase freq const by 176
+	FRQINC0C		equ	99			; increase freq const by 192
+	FRQINC0D		equ	100			; increase freq const by 208
+	FRQINC0E		equ	101			; increase freq const by 224
+	FRQINC0F		equ	102			; increase freq const by 240					
+				
+	FRQDEC00		equ	103			; decrease freq const by 256
+	FRQDEC01		equ	104			; decrease freq const by 16
+	FRQDEC02		equ	105			; decrease freq const by 32
+	FRQDEC03		equ	106			; decrease freq const by 48
+	FRQDEC04		equ	107			; decrease freq const by 64
+	FRQDEC05		equ	108			; decrease freq const by 80
+	FRQDEC06		equ	109			; decrease freq const by 96
+	FRQDEC07		equ	110			; decrease freq const by 112
+	FRQDEC08		equ	111			; decrease freq const by 128
+	FRQDEC09		equ	112			; decrease freq const by 144
+	FRQDEC0A		equ	113			; decrease freq const by 160
+	FRQDEC0B		equ	114			; decrease freq const by 176
+	FRQDEC0C		equ	115			; decrease freq const by 192
+	FRQDEC0D		equ	116			; decrease freq const by 208
+	FRQDEC0E		equ	117			; decrease freq const by 224
+	FRQDEC0F		equ	118			; decrease freq const by 240
+				
+	ADSR00			equ	119			; volume ADSR 0 
+	ADSR01			equ	120			; volume ADSR 1	
+	ADSR02			equ	121			; volume ADSR 2
+	ADSR03			equ	122			; volume ADSR 3
+	ADSR04			equ	123			; volume ADSR 4
+	ADSR05			equ	124			; volume ADSR 5
+	ADSR06			equ	125			; volume ADSR 6
+	ADSR07			equ	126			; volume ADSR 7
+	ADSR08			equ	127			; volume ADSR 8
+	ADSR09			equ	128			; volume ADSR 9
+	ADSR0A			equ	129			; volume ADSR 10
+	ADSR0B			equ	130			; volume ADSR 11
+	ADSR0C			equ	131			; volume ADSR 12
+	ADSR0D			equ	132			; volume ADSR 13
+	ADSR0E			equ	133			; volume ADSR 14
+	ADSR0F			equ	134			; volume ADSR 15
+				
+	WAVE01			equ	135			; sqaure waveform
+	WAVE02			equ	136			; triangle waveform
+	WAVE03			equ	137			; sawtooth waveform
+	WAVE04			equ	138			; noise waveform
+				
+	LOOP			equ	$ff			; loop entire music
+				
+	; U0,U1,VID,U3 paging can be used			
+	PIC_TITLE_ZX7		incbin	"plasmoid_mainTVC.bin.zx7"
+	SHIP_ZX7		incbin	"ship_main.bin.zx7"
+	TITLE_PIC_ZX7		incbin	"title.bin.zx7"
+				
+	; must be copy to $c000 first and decompress from there to $8000
+	GAMEOVER_PIC_ZX7	incbin	"gameoverTVC.bin.zx7"
+	REWARD_PIC_ZX7		incbin	"rewardTVC.bin.zx7"
+	EXPLOSION_SPRITE_ZX7	incbin	"explosion.bin.zx7"	;24*16 ->96 bájt
+	LOGO_PIC_ZX7		incbin	"logo_picture.zx7"
+				
+	;from here ONLY U0,U1,U2,U3 paging is needed!
+	MUSIC_DATA_ZX7		incbin	"Plasma_Intro.sid.bin.zx7"
+	MUSIC2_DATA_ZX7		incbin	"Crack_It_Up.sid.bin.zx7"
+	MUSIC_FUNERAL_ZX7	incbin	"Outro.sid.bin.zx7"
+				
+	DIGI_START		incbin	"8kHz_missinplasmoidstarts.bin.zx7"
+	DIGI_WARNING		incbin	"8kHz_warning.bin.zx7"
+	DIGI_GAMEOVER		incbin	"8kHz_gameover.bin.zx7"
+	DIGI_REWARD		incbin	"8kHz_congratulationscaptain.bin.zx7"
+	DIGI_BIP		incbin	"8kHz_bip.bin.zx7"
+				
+	REZONANCE_MUSIC		db	C1,C1,C1
+				db	SKIP,FRQDEC01,FRQINC02
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	SKIP,SKIP,SKIP
+				db	LOOP
+				
+				nop
+				
+				end
+				

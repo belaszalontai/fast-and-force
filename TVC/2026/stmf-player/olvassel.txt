@@ -1,0 +1,7 @@
+Vass Sanyi féle Multichip Soundcard a TVC 1-es bővítőhelyén (1-es slot) legyen, mert nincs detektálás, csak használja, ha van kártya, ha nincs..
+A program a 6 csatornás SAA1099 hangchip-hez készült és az STMF formátumú zenéket játsza le.
+
+Tracker/zeneszerkesztő program: https://saa1099tracker.borik.net/
+
+TVC_SAA_STMF_PLAYER.dt80asm			majdnem teljes értékű STMF formátum lejátszó TVC-re
+SAMCoupe_SAA_STMF_MINIMAL.dt80asm	minimális STMF feature-öket tartalmaz, de még szépen szól (kevesebb CPU időt vesz el a lejátszó)

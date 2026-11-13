@@ -1,0 +1,13 @@
+-------------------------------------------------------------------------
+TVC 1tm player
+(c) 2024 by Fast&Force (Béla Szalontai)
+-------------------------------------------------------------------------
+
+0. használj TVC Developer Tool-t
+1. tölts le az 1tracker-t innen: https://shiru.untergrund.net/software.shtml
+2. indítsd el az 1tracker-t, majd válts át F7-el ZX 1 bit Squat Engine-re
+3. írj egy zenét a trackerrel
+4. exportáld ki Assembly formátumba
+5. a kód zenei adat részét másold be a TVC-s lejátszó assembly kódjának végére a music_data címkéhez
+6. a # karaktereket mindenhol cseréld ki $ karakterre
+7. nyomj F5-öt a Developer Tool-ban és élvezd a zenédet 1 bit helyett 4 biten keverve

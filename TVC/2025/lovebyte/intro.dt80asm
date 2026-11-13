@@ -1,0 +1,330 @@
+				
+				org	6639			; TVC programok kezdőcíme
+                                ;{BASIC Header
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+				di
+				ld	a,85
+				out	(97),a
+				out	(98),a
+				out	(99),a
+				ld	a,$50			; video RAM + SYSTEM ROM
+				out	(2),a			; memory page register
+				xor	a
+				out	(6),a
+				
+				ld	hl,picture
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+				call	waitfor2sec
+				
+				ld	bc,$0A07
+				rst	$30
+				db	$23
+				
+				ld	de,SZ1			; ROBODATE  2025
+				ld	bc,14
+				rst	$30
+				db	$22
+				
+				ld	bc,$0903
+				rst	$30
+				db	$23
+				
+				ld	de,SZ3			; 860 BYTE FOR TVC
+				ld	bc,16
+				rst	$30
+				db	$22
+				
+				call	waitfor2sec
+				
+				ld	a,$50			; video RAM + SYSTEM ROM
+				out	(2),a			; memory page register
+				
+	c2			and	252
+				out	(6),a
+				out	(4),a
+				out	(0),a
+				
+	x_cordinate		ld	hl,32768 + 68*64 + 81
+				ld	b,22
+	c1			ld	a,(hl)
+				rlca
+				ld	(hl),a
+				inc	hl
+				djnz	c1
+				ld	bc,64-22
+				add	hl,bc
+				ld	(x_cordinate+1),hl
+				ld	a,h
+				cp	$F0
+				jr	c,hl_store
+				ld	hl,32768 + 68*64 + 81
+				ld	(x_cordinate+1),hl
+				
+	hl_store		ld	hl,0
+				dec	hl
+				ld	(hl_store+1),hl
+				ld	a,h
+				or	l
+				jr	nz,c2
+				
+				xor	a			; sound off
+				out	(4),a
+				out	(5),a
+				
+				ld	hl,$c000
+				ld	de,$8000
+				ld	bc,$4000
+				ldir
+				
+				ld	de,$c000
+	main			ld	b,50
+	loop			ld	a,(hl)
+				and	60
+				out	(6),a			; white noise to 4 bit DA converter
+				inc	hl
+				ld	a,h
+				or	128
+				ld	h,a
+				djnz	loop
+				ld	a,12			; random video memory start address
+				out	(112),a
+				ld	a,(de)
+				and	16
+				out	(113),a
+				ld	a,13
+				out	(112),a
+				inc	de
+				ld	a,(de)
+				out	(113),a
+				inc	de
+				ld	a,d
+				or	128
+				ld	d,a
+				push	hl
+	downcounter		ld	hl,8000			; length of the white noise ending
+				dec	hl
+				ld	(downcounter+1),hl
+				ld	a,h
+				or	l
+				pop	hl
+				jr	z,finish
+				jr	main
+				
+	finish			ld	a,1			; CRTC OFF
+				out	(112),a
+				xor	a
+				out	(113),a
+				out	(6),a			; SOUND OFF
+	endless			jr	endless
+				
+;------------------
+; Wait for 2 sec
+	waitfor2sec		ei
+				ld	b,100
+	wait2s			halt
+				djnz	wait2s
+				di
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di				; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS1		; no more bits left?
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jr	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2EV		; no more bits left?
+				jr	NC,LENSIZELOOPEV
+				jr	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2OD		; no more bits left?
+				jr	NC,LENSIZELOOPOD
+				jr	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jr	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS5		; no more bits left?
+				ccf
+				jr	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jr	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jr	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPEV
+				jr	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPOD
+				jr	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jr	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDOD
+				jr	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jr	C,OFFSETENDOD
+				jr	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jr	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jr	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jr	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jr	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jr	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jr	OFFSETINCEV
+				ret
+				
+	SZ1			db	"ROBODATE  2025"
+	SZ3			db	"860 BYTE FOR TVC"
+				
+	picture			incbin	"out24.bin.zx7"
+				
+				end

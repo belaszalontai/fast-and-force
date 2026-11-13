@@ -1,0 +1,333 @@
+program MusicUnitDemo;
+@use "Music"
+@use "crtc"
+@use "Random"
+
+var  
+	// plasma variables
+	val,val2,c2x, c2y,ax, ay,time, time2 : byte;
+	x,y,shift : byte;
+	dst : ^byte;
+	// mini sine table
+	const width : byte = 512/8;
+	const height : byte = 64/2;	
+	// The tables must be aligned at $xx00
+    	siny : array[width] of byte at $7F00; 
+		sinx : array[height] of byte at $7E00; 
+	// Org sine table
+	sin : array[256] of byte = buildsinetable(127);
+ 	// smooth data generated in resources/fjong/generate_data.fjo
+	data : incbin("resources/smooth_data.bin", $7D00);
+
+	music_zx7_data					: incbin("resources/Drax_Music.sid.bin.zx7");	
+	main_pic_zx7_data				: incbin("resources/main_pic.zx7");	
+	jarre_pic_zx7_data				: incbin("resources/jarreplasma_pic.zx7");
+		
+	const Music_MEM_ADDR 	: integer = 49152;
+	const Video_MEM_ADDR	: integer = 32768;
+	
+	bg_color					: byte = 1;
+	rnd_pal,rnd_val			: byte = 0;
+	SAVE_BC					: integer = 0;	
+	SAVE_HL					: integer = 0;
+	frame_nr					: integer = 0; // counting music frames
+	Video_Memory_CRTC_Addr	: integer = 0;	
+	Horizontal_Sync_CRTC	: byte = 76;
+	
+	plasma_shift				: byte = 32;
+	
+// Plasma procedure
+procedure Calculate();
+begin
+	c2x:=ax;
+	c2y:=ay;
+	
+	// Set up y-sine table
+	for x:=0 to height do begin 
+		siny[x]:=  sin[c2x] + sin[c2y]-time2;
+		c2x:=c2x+2+plasma_shift;
+		c2y:=c2y+5+plasma_shift;
+	end;
+
+	ax:=ax+2;
+	ay:=ay-3;
+
+	// Set up x-sine table
+	for x:=0 to width do begin 
+		sinx[x] := sin[c2x] + sin[c2y];
+		c2x:=c2x+3+plasma_shift;
+		c2y:=c2y+7+plasma_shift;
+
+	end;
+	// alternate every 2nd line
+	dst:=$8000+shift<<7 + 128*32;
+end;
+
+procedure Plasma();
+begin
+	for y:=0 to height  offpage do 
+	begin
+		val:=siny[y];
+		//unrolled
+		asm("
+			ld de,[dst]
+			ld a,[val]
+			ld b,a
+			repeat 64
+			
+			ld hl,sinx +[i]
+			
+			ld a,b  ; a = val
+			add a,[hl] ; a+ sinx[x]
+			; lookup table data [ ...]
+			ld hl,data
+			ld l,a ; +data[a]
+			
+			ldi ; ld [de],[hl], inc de
+			
+			repend
+		
+		");
+		dst+=64*4;
+	end;
+end;
+
+procedure Clrscr();
+begin
+	asm("
+	;-------------------------------------------------------------------------------------------------------------------------------------- 
+	; Clear Screen (tricky clear screen (atomization)
+								
+				ld	A,$00			; color = BLACK
+				ld	HL,$7F00
+				ld	B,$06
+	CLRSCR0:	ld	(SAVE_BC),BC
+				ld	(SAVE_HL),HL
+				ld	B,$2A
+	CLRSCR1:	ld	C,B
+				ld	B,$41
+	CLRSCR2:	ld	(HL),A
+				inc	HL
+				inc	HL
+				inc	HL
+				djnz	CLRSCR2
+				ld	DE,$00C0
+				add	HL,DE
+				ld	B,C
+				halt
+				halt
+				halt
+				halt
+				djnz	CLRSCR1
+				ld	HL,(SAVE_HL)
+				ld	DE,$0041
+				add	HL,DE
+				ld	BC,(SAVE_BC)
+				djnz	CLRSCR0
+				ret
+	");
+end;
+
+procedure DisableCRTC();
+begin
+	asm("
+				ld	A,1			; CRTC disable screen
+				out	($70),A
+				ld	A,0
+				out	($71),A
+				ret
+	");
+end;
+
+var SValue: byte;
+procedure EnableCRTC(SValue : global byte);
+begin
+	asm("
+				ld	A,1			; CRTC enable screen
+				out	($70),A
+				ld	A,[SValue]
+				out	($71),A
+				ret
+	");
+end;
+
+procedure Wait20ms();
+var j:byte;
+begin
+		for j:=0 to 248 do
+		begin
+			asm("
+					halt;
+			");
+		end;
+	
+end;
+
+procedure SetCRTCVideoAddress(Video_Memory_CRTC_Addr: global integer);
+begin
+	asm("
+				ld hl,[Video_Memory_CRTC_Addr]
+				ld	A,12			;// CRTC Video Memory Address H
+				out	($70),A
+				ld	A,H
+				out	($71),A
+				ld	A,13			;// CRTC Video Memory Address L
+				out	($70),A
+				ld	A,L
+				out	($71),A
+				ret
+	");
+end;
+
+procedure SetCRTCHorizontalSync(Horizontal_Sync_CRTC: global byte);
+begin
+	asm("
+				ld	A,2				
+				out	($70),A
+				ld	A,[Horizontal_Sync_CRTC]
+				out	($71),A
+				ret
+	");
+end;
+
+procedure SetScreenLines256();
+begin
+  Asm("                                    
+      ld  A,$6
+      out ($70),A            ;// CRTC number of screen lines displayed Register
+      ld  A,$40
+      out ($71),A            ;// 256 lines / 4 = 64
+      ret
+			");
+end;
+
+
+var i								: byte;
+var scroll_address			: integer = 0;
+var scroll_array			: array[17] of integer = (0,128,192,320,384,512,576,640,704,832,832,896,960,960,1024,1024,1024,1024,1024,960,960,896,832,768,704,640,512,448,320,256,128,64,4096,3968,3904,3776,3712,3584,3520,3456,3392,3264,3264,3200,3136,3136,3072,3072,3072,3072,3072,3136,3136,3200,3264,3328,3392,3456,3584,3648,3776,3840,3968,4032);
+var scroll_array_idx		: byte = 0;
+var horyzontal_sync		: byte = 6;
+var horyzontal_sync_dir	: byte = 0;
+
+begin
+	DisableCRTC();
+	Music::SetMemory(MUSIC::MEM_48K_VID); 	
+	
+	Music::ZX7Decompress(#main_pic_zx7_data, Video_MEM_ADDR); // a kezdőkép kitömörítése a VID lapra
+	Music::ZX7Decompress(#music_zx7_data, Music_MEM_ADDR); // a demó zene kitömörítése az U3 lapra
+	Music::Init(Music::INTERRUPT_FREQ_5008);	
+	Music::Play(Music_MEM_ADDR, Music::BPM_SID_5008, Music::GRAPHICS_MODE_16);
+	
+	for i:=0 to 65 do
+	begin
+	   EnableCRTC(i);
+	   Wait20ms();
+	end;
+
+	for i:=0 to 60 do
+	begin
+	   Wait20ms();
+	end;
+	
+	Clrscr();
+
+	DisableCRTC();
+	
+	Music::ZX7Decompress(#jarre_pic_zx7_data, Video_MEM_ADDR); // a Jarre Plasma kép kitömörítése a VID lapra
+	for i:=0 to 65 do
+	begin
+	   EnableCRTC(i);
+	   Wait20ms();
+	end;
+
+	for i:=0 to 75 do
+	begin
+	   Wait20ms();
+	end;
+	
+	Clrscr();
+	SetScreenLines256();
+	
+	Music::ResetGraphicsMode(Music::GRAPHICS_MODE_4);
+	
+	Crtc::SetPalette(0,Crtc::black);
+	Crtc::SetPalette(1,Crtc::dark_cyan);
+	Crtc::SetPalette(2,Crtc::dark_magenta);
+	Crtc::SetPalette(3,Crtc::dark_green);
+	
+	while (Music::IsMusicFinished() = 0) do
+	begin
+		// Processing Plasma
+		Calculate();
+		time2+=5;
+		time+=1;
+		shift:=time&1;
+		Plasma();
+		
+		// Processing CRTC and palette animation
+		frame_nr+=1;
+		
+		if (frame_nr > 360) then
+		begin
+			Music::Stop();
+		end
+		else
+		begin
+			if (frame_nr > 148) then				// manipulating plasma
+			begin
+				if (plasma_shift > 0) then plasma_shift-=1;	
+			end;
+			
+			if (frame_nr > 109) then				// horizontal movement
+			begin
+				SetCRTCHorizontalSync(70+horyzontal_sync);
+				if (horyzontal_sync_dir = 0) then
+				begin
+					horyzontal_sync+=1;	
+				end
+				else
+				begin
+					horyzontal_sync-=1;			
+				end;
+				
+				if (horyzontal_sync = 12) then 
+				begin 
+					horyzontal_sync_dir:=1;
+				end
+				else if (horyzontal_sync = 0) then 
+				begin 
+					horyzontal_sync_dir:=0;
+				end
+				
+			end;
+					
+			if (frame_nr > 71) then				// vertical movement
+			begin
+				scroll_address:= scroll_array[scroll_array_idx];
+				scroll_array_idx+=1;
+				if (scroll_array_idx = 64) then scroll_array_idx:=0;
+				SetCRTCVideoAddress(scroll_address);
+			end;
+	
+			if (frame_nr > 38 and frame_nr < 148) then			// palette animation
+			begin
+				rnd_pal+= 1;
+				if (rnd_pal = 3) then rnd_pal:= 1;
+				rnd_val:= Random::RandomByte();
+				Crtc::SetPalette(rnd_pal, rnd_val);
+			end;
+
+			if (frame_nr = 148) then				// fix palette
+			begin
+				Crtc::SetPalette(0,Crtc::black);
+				Crtc::SetPalette(1,Crtc::cyan);
+				Crtc::SetPalette(2,Crtc::blue);
+				Crtc::SetPalette(3,Crtc::dark_green);
+			end;
+			
+		end;
+	end;
+	DisableCRTC();
+	while (true) do;
+end.
+

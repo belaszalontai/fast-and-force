@@ -1,0 +1,474 @@
+				
+				org	6639			; TVC programok kezdőcíme
+                                ;{BASIC Header
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+				jp	INIT			; <- 6659 ($1A03) memóriacím (a BASIC header ezt hívja meg a "10 PRINT USR(6659)" utasítással)
+				
+;******************************************************************
+; INTERRUPT HANDLER 
+; Worst Case Execution time: 204 cycle 
+; Interrupt Frequency: ~ 4340 Hz
+; CPU load by IRQ max: 29% (71% of CPU can be used)
+;
+; DE' = ch 1 phase accumulator counter;
+; HL' = ch 2 phase accumulator counter
+; BC' = local variable
+;
+;******************************************************************                                         
+	IT_HANDLER		ex	af,af'
+				exx
+				out	(7),a			; ack interrupt
+				
+	CRTC_SYNC_CNT		ld	a,SYNC_COUNT		; alter crtc sync counter         
+				dec	a
+				ld	(CRTC_SYNC_CNT+1),a	; self modifying code
+				
+; alter phase accumulator counters for channels
+	PAC1			ld	bc,$0000
+				ex	de,hl
+				add	hl,bc
+				ex	de,hl			; DE = DE + phase accumulator increment 1
+	PAC2			ld	bc,$0000
+				add	hl,bc			; HL = HL + phase accumulator increment 2
+				
+; convert signal to waveform
+	ch1_waveform_tableH	ld	b,$1D			; address of wave table for channel 1
+				ld	c,d
+				ld	a,(bc)			; lookup wave table for channel 1
+				ld	c,h			; save h
+				ld	h,a
+	ch2_waveform_tableH	ld	b,$1E			; address of wave table for channel 2
+				ld	a,(bc)			; lookup wave table for channel 2
+				add	a,h			; mix two channels
+				ld	h,c			; restore h
+; write to sound port				
+				or	1			; must have in 16 color graphics mode (or 1 in 4 color mode)
+				out	(6),a			; write to sound port
+				exx
+				ex	af,af'
+				ei
+				ret
+				
+	SYNC_COUNT		equ	85			; 85 for 20ms 50FPS, 171 for 40ms 25FPS (1 / 3125000/16/45/SYNC_COUNT)
+				
+;******************************************************************
+; INIT MUSIC MIXER INTERRUPT HANDLER
+;******************************************************************
+	IT_HANDLER_1		db	00h
+	IT_HANDLER_2		dw	0000h
+				
+	START_MUSIC_MIXER	ld	A,SYNC_COUNT
+				ld	(CRTC_SYNC_CNT+1),A
+				ld	A,10			; disable CRTC CURSOR IT
+				out	(112),A
+				ld	A,35
+				out	(113),A
+				ld	A,$D3			; Sound IT counter divider LO
+				out	(4),A			; (4096 - 45 = 4051 = $0FD3)
+				ld	A,32+$0F		; Sound IT enabled, sound is OFF + divider HI
+				out	(5),A			; IT frequency = Fsys / 16 / 45 = ~ 4340,27 Hz
+				ld	A,(0038h)		; SAVE IT HANDLER
+				ld	(IT_HANDLER_1),A
+				ld	HL,(0039h)
+				ld	(IT_HANDLER_2),HL
+				ld	A,0C3h			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038h),A
+				ld	HL,IT_HANDLER
+				ld	(0039H),HL
+				ei				; enable interrupt
+				ret
+				
+;******************************************************************
+; RESTORE INTERRUPT HANDLER
+;******************************************************************
+	STOP_MUSIC_MIXER	di
+				ld	A,10			; restore the original interrupt
+				out	(112),A
+				ld	A,3
+				out	(113),A			; CURSOR IT enabled
+				xor	A
+				out	(4),A
+				out	(5),A			; Sound IT disabled, Sound is OFF
+				ld	A,(IT_HANDLER_1)	; RESTORE IT HANDLER
+				ld	(0038h),A
+				ld	HL,(IT_HANDLER_2)
+				ld	(0039h),HL
+				ei
+				ret
+				
+;******************************************************************
+; trigger a sound effect on channel 2
+;******************************************************************
+	SOUND_FX_XPLODE		ld	a,$20			; address high value of noise table
+				ld	(ch2_waveform_tableH+1),a; channel 2 is used for sound effect from now
+				ld	bc,$0040		; starting frequency 
+				ld	(PAC2+1),bc
+				ret
+				
+;******************************************************************
+; init sound player
+;******************************************************************
+	INIT			di				; IT disabled
+				exx				; save shadow registers
+				push	HL
+				push	BC
+				push	DE
+				exx
+				
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR INTERRUPT
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	RUNLOOP			ld	A,(CRTC_SYNC_CNT+1)	; WAITING FOR THE GIVEN NUMBER OF INTERRUPTS
+				or	A			; INSTEAD OF Z80's HALT
+				jr	NZ,RUNLOOP		; wait for proper number of cycle
+				ld	A,SYNC_COUNT
+				ld	(CRTC_SYNC_CNT+1),A	; ack the SIGNAL            
+				ld	A,10			; restore the original interrupt
+				out	(112),A
+				ld	A,3
+				out	(113),A			; CURSOR IT enabled                   
+				xor	A			; sound IT disabled
+				out	(5),A
+				halt				; WAIT for a real CRTC sync by cursor interrupt
+				ld	A,10
+				out	(112),A
+				ld	A,35
+				out	(113),A			; CURSOR IT disabled
+				ld	A,32+15			; Sound IT enabled, HW sound generator is OFF
+				out	(5),A
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                                                      	
+; now we are synced with crtc (for 50 fps -> we have 14 msec to process game, for 25 fps -> we have 28 msec to process the game)
+				
+	PROCESSING_GAME		ld	a,255
+				out	(0),a
+				halt				; @4340Hz it is 1/4340*1000 ms = 0,23msec
+				xor	a
+				out	(0),a
+				
+	KEY_CHECK		ld	A,7			; check the SPACE button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	5,A			; check SPACE key is pressed                           
+				jr	NZ,PG_ESC
+				call	SOUND_FX_XPLODE		; trigger explode sound fx
+				
+	PG_ESC			ld	A,7			; check the ESC button
+				out	(3),A			; select 7th row of keyboard matrix
+				in	A,(88)			; read keyboard matrix row
+				bit	3,A			; check ESC key is pressed                           
+				jr	NZ,MUSIC_PROCESSOR
+				jr	END_OF_GAME		; end of GAME (exit)
+				
+;-------------------------------------------------------------------------------------------------------------------------------------- 
+; music processor must be at the end of game processing loop
+				
+	MUSIC_PROCESSOR		ld	a,(ch2_waveform_tableH+1); processing possible EFX on channel 2
+				cp	$20			; check if channel-1 is sound or EFX channel
+				jr	nz,MP_NEXT
+				ld	a,(PAC2+1)
+				sub	4			; decrement effect channel frequency
+				ld	(PAC2+1),a
+				jr	nz,MP_NEXT
+				ld	a,$1E			; effect is over change the channel back to sound
+				ld	(ch2_waveform_tableH+1),a
+				
+	MP_NEXT			ld	A,1			; count duration
+				dec	A
+				ld	(MP_NEXT+1),A
+				jr	NZ,RUNLOOP
+				ld	a,1
+				ld	(MP_NEXT+1),A
+				
+	MUSICPOS		ld	HL,MUSIC_DATA-1
+				ld	d,$1c			; high address of sound frequency constant lookup table
+	MP_CH1			inc	hl
+				ld	a,(hl)			; load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; first byte can be LOOP control
+				jr	nz,MP_SKIP
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; reset music data pointer
+				ld	(MUSICPOS+1),HL
+				jr	MP_CH1			; restart parsing
+				
+	MP_SKIP			cp	SKIP
+				jr	z,MP_CH2		; SKIP -> skip channel 1
+; handle normal musical note on CH1
+				ld	e,a
+				sla	e			; low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; load frequ constant for CH1
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC1+1),BC		; put into CH1 freq constant in irq handler    	
+				
+	MP_CH2			ld	a,(ch2_waveform_tableH+1)
+				cp	$20			; check if channel-1 is sound or EFX channel
+				jr	nz,ch2_is_sound
+				inc	hl			; skip music record for channel 2
+				ld	(MUSICPOS+1),HL
+				jp	RUNLOOP			; go to runloop
+				
+	ch2_is_sound		inc	hl
+				ld	a,(hl)
+; check control codes for channel 2
+				cp	SKIP
+				jr	z,MP_END		; SKIP -> skip channel 2
+; handle normal musical note on CH2
+				ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH2
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC2+1),BC		; put into CH2 freq constant in irq handler     				
+				
+	MP_END			ld	(MUSICPOS+1),HL
+				jp	RUNLOOP			; go to runloop
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	END_OF_GAME		call	STOP_MUSIC_MIXER	; stops SOUND GENERATOR INTERRUPT
+				exx				; restore ex registers
+				pop	DE
+				pop	BC
+				pop	HL
+				exx
+				ret				; exit
+				
+;******************************************************************
+; MUSIC PLAYER DATA
+;******************************************************************
+				
+	DURATION_COUNTER	db	0
+	MUSIC_DATA_POINTER	dw	$0000
+				
+				org	$1c00
+; Freq divider table for musical sounds (address must be divisible by 256)			
+	SOUND_TABLE		dw	494			; 32.7 Hz
+				dw	523			; 34.65 Hz
+				dw	554			; 36.71 Hz
+				dw	587			; 38.89 Hz
+				dw	622			; 41.2 Hz
+				dw	659			; 43.65 Hz
+				dw	698			; 46.25 Hz
+				dw	740			; 49 Hz
+				dw	784			; 51.91 Hz
+				dw	830			; 55 Hz
+				dw	880			; 58.27 Hz
+				dw	932			; 61.74 Hz
+				dw	988			; 65.41 Hz
+				dw	1046			; 69.3 Hz
+				dw	1109			; 73.42 Hz
+				dw	1174			; 77.78 Hz
+				dw	1244			; 82.41 Hz
+				dw	1318			; 87.31 Hz
+				dw	1397			; 92.5 Hz
+				dw	1480			; 98 Hz
+				dw	1568			; 103.83 Hz
+				dw	1661			; 110 Hz
+				dw	1760			; 116.54 Hz
+				dw	1864			; 123.47 Hz
+				dw	1975			; 130.81 Hz
+				dw	2093			; 138.59 Hz
+				dw	2217			; 146.83 Hz
+				dw	2349			; 155.56 Hz
+				dw	2489			; 164.81 Hz
+				dw	2637			; 174.61 Hz
+				dw	2793			; 185 Hz
+				dw	2960			; 196 Hz
+				dw	3135			; 207.65 Hz
+				dw	3322			; 220 Hz
+				dw	3519			; 233.08 Hz
+				dw	3729			; 246.94 Hz
+				dw	3950			; 261.63 Hz
+				dw	4185			; 277.18 Hz
+				dw	4434			; 293.66 Hz
+				dw	4698			; 311.13 Hz
+				dw	4977			; 329.63 Hz
+				dw	5273			; 349.23 Hz
+				dw	5587			; 369.99 Hz
+				dw	5919			; 392 Hz
+				dw	6271			; 415.3 Hz
+				dw	6644			; 440 Hz
+				dw	7039			; 466.16 Hz
+				dw	7457			; 493.88 Hz
+				dw	7901			; 523.25 Hz
+				dw	8371			; 554.37 Hz
+				dw	8868			; 587.33 Hz
+				dw	9396			; 622.25 Hz
+				dw	9954			; 659.25 Hz
+				dw	10546			; 698.46 Hz
+				dw	11173			; 739.99 Hz
+				dw	11838			; 783.99 Hz
+				dw	12542			; 830.61 Hz
+				dw	13288			; 880 Hz
+				dw	14078			; 932.33 Hz
+				dw	14915			; 987.77 Hz
+				dw	15802			; 1046.5 Hz
+				dw	16741			; 1108.73 Hz
+				dw	17737			; 1174.66 Hz
+				dw	18791			; 1244.51 Hz
+				dw	19909			; 1318.51 Hz
+				dw	21093			; 1396.91 Hz
+				dw	22347			; 1479.98 Hz
+				dw	23676			; 1567.98 Hz
+				dw	25084			; 1661.22 Hz
+				dw	26575			; 1760 Hz
+				dw	28155			; 1864.66 Hz
+				dw	29830			; 1975.53 Hz
+				dw	31603			; 2093 Hz		
+				dw	0			; 0 Hz    
+				
+; definition of music data record elements
+; musical sounds C1-C8	
+				
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	64
+	E6			equ	65
+	F6			equ	66
+	FISZ6			equ	67
+	G6			equ	68
+	GISZ6			equ	69
+	A6			equ	70
+	AISZ6			equ	71
+	B6			equ	72
+				
+	C7			equ	73
+				
+	SKIP			equ	$fe
+	LOOP			equ	$ff			; loop entire music
+				
+				org	$1D00
+				; must be organized to xx00h address (divisible by 256)
+				; 1D00h 
+	square_table		db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				; $1E00
+	triangle_table		db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04
+				db	$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08
+				db	$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C
+				db	$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				db	$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10
+				db	$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C
+				db	$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08
+				db	$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$00,$00,$00,$00
+				; $1F00
+	sawtooth_table		db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+				db	$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04
+				db	$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04,$04
+				db	$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08
+				db	$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08,$08
+				db	$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C
+				db	$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C
+				db	$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10
+				db	$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10,$10
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				db	$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14,$14
+				; $2000
+	noise_table		db	$08,$14,$18,$08,$18,$14,$0C,$00,$08,$04,$04,$0C,$08,$0C,$08,$18,$04,$18,$08
+				db	$0C,$0C,$14,$08,$0C,$0C,$04,$00,$0C,$04,$0C,$18,$00,$18,$18,$04,$10,$04,$0C
+				db	$14,$04,$00,$18,$18,$14,$00,$00,$10,$18,$18,$08,$04,$04,$04,$00,$00,$04
+				db	$10,$04,$18,$14,$14,$04,$08,$14,$00,$0C,$00,$04,$00,$18,$10,$04,$04,$14
+				db	$00,$08,$08,$18,$00,$08,$00,$04,$00,$00,$00,$18,$14,$14,$10,$14,$0C,$10
+				db	$14,$08,$04,$10,$10,$10,$00,$04,$00,$08,$04,$14,$00,$18,$00,$00,$08,$18,$04
+				db	$10,$00,$08,$14,$04,$10,$14,$08,$04,$04,$08,$04,$04,$0C,$14,$18,$00,$10
+				db	$18,$04,$14,$08,$00,$04,$18,$14,$04,$0C,$04,$0C,$04,$04,$14,$0C,$00,$04
+				db	$04,$00,$0C,$18,$14,$14,$0C,$10,$10,$08,$0C,$04,$08,$10,$08,$0C,$04,$04
+				db	$04,$18,$04,$04,$04,$0C,$08,$10,$14,$00,$14,$00,$14,$18,$18,$00,$0C,$08
+				db	$04,$10,$0C,$10,$0C,$04,$18,$04,$04,$0C,$0C,$0C,$04,$08,$10,$0C,$0C,$00,$04
+				db	$0C,$00,$18,$18,$10,$14,$14,$14,$08,$04,$00,$14,$00,$08,$00,$14,$18,$14
+				db	$08,$10,$04,$04,$00,$08,$14,$10,$00,$0C,$04,$10,$00,$18,$10,$14,$18,$04
+				db	$0C,$10,$00,$18,$04,$04,$08,$18,$00,$18,$10,$04,$00,$00,$00,$0C,$04,$08
+				
+				
+; MUSIC DATA RECORDS							
+	MUSIC_DATA		#include	"music_2ch_crtc.txt"
+				
+				db	LOOP			; must be here to loop the music
+				
+				end

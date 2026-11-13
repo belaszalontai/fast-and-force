@@ -1,0 +1,2589 @@
+	MUSIC_DATA		equ	$C000
+				
+				
+				org	6639			; TVC programok kezdőcíme
+                                ;{BASIC Header
+				db	$0F,$0A,$0,$DD		; "10 PRINT" - basic token
+				db	' USR'			; " USR"
+				db	$96			; "("
+				db	'6659'			; "6659"
+				db	$95,$FF			; ")"                         
+				db	0,0,0,0,0		; így 20 byte a BASIC header, a kód pedig 6659-nél ($1A03) kezdődik
+                                ;}
+				
+				jp	MAIN			; <- 6659 ($1A03) memóriacím (a BASIC header ezt hívja meg a "10 PRINT USR(6659)" utasítással)
+				
+;******************************************************************
+; INTERRUPT HANDLER 
+; Execution time: 280 cycle 
+; Interrupt Frequency: ~ 8491.847826086956 Hz
+; CPU load by sound generator: ~ 77%
+;
+; EXX IX = channel 1 phase accumulator 
+; EXX IY = channel 2 phase accumulator 
+; EXX HL = channel 3 phase accumulator 
+;
+; EXX BC = local variable for calculation 
+; EXX DE = local variable for mixing
+;******************************************************************                                         
+	IT_HANDLER		ex	af,af'
+				exx
+				out	(7),a			;   	ack interrupt
+				
+; alter phase accumulator counter for channel 1
+	PAC1			ld	BC,$0000
+				add	IX,BC			; 	IX = IX + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 2
+	PAC2			ld	BC,$0000
+				add	IY,BC			; 	IY = IY + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 3
+	PAC3			ld	BC,$0000
+				add	HL,BC			; 	HL = HL + phase accumulator freq const
+				
+; set mixed value for channel 1 based on pac1 msb				
+				ld	C,80h
+				ld	A,IXH
+				cp	C			; 	check highest bit of PAC1
+				sbc	A,A
+	CH1_VOLUME		and	MASTER_VOLUME_CH1	; $1C for 2 ch, $14 for 3 ch (can be: $14,$10,$0C,$08,$04,$00)			
+				
+				ld	B,A			;     	STORE CH1
+				
+; set mixed value for channel 2 based on pac2 msb				
+				ld	A,IYH
+				cp	C			; 	check highest bit of PAC2
+				sbc	A,A
+	CH2_VOLUME		and	MASTER_VOLUME_CH2
+				add	A,B			; 	MIX CH1 + CH2
+				ld	B,A			;     	STORE CH1 + CH2         
+				
+; set mixed value for channel 3 based on pac3 msb				
+				ld	A,H
+				cp	C			; 	check highest bit of PAC3
+				sbc	A,A
+	CH3_VOLUME		and	MASTER_VOLUME_CH3
+				add	A,B			; 	MIX CH1 + CH2 + CH3
+				
+	GR_MODE			or	1			; 	must have in 4 color graphics mode (2 for 16 color mode)
+				out	(6),A			;	write to sound port
+				
+	DURATION_COUNTER	ld	A,DURATION_IRQ_CONST	; 06h -> 1 ms, 55h -> 10 ms
+				dec	A
+				ld	(DURATION_COUNTER+1),A
+				jr	Z,MUSIC_PROCESSOR	; music processor is part of interrupt
+				
+				exx
+				ex	AF,af'
+				ei
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                                                      
+	MUSIC_PROCESSOR		ld	A,DURATION_IRQ_CONST	; reset duration counter (06h -> 1 ms, 55h -> 10 ms)
+				ld	(DURATION_COUNTER+1),A
+;--------------------------------------------------------------------------------------------------------------------------------------                                                                      
+				exx
+				ex	AF,af'
+				ei				; interrupt is enabled but not finished. running on (the next interrupt) is not a problem
+				push	AF			; running in the interrupt -> normal registers are need to be saved
+				push	BC
+				push	DE
+				push	HL
+				
+; Handling ADSR for channels (only volume release)				
+	CH1_VOL_RELEASE_CNT	ld	bc,0
+				dec	bc
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jr	nz,CH2_VOL_RELEASE_CNT
+	CH1_VOL_RELEASE		ld	bc,0			; reset counter
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH1_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jr	c,CH2_VOL_RELEASE_CNT
+				ld	(CH1_VOLUME+1),a
+				
+	CH2_VOL_RELEASE_CNT	ld	bc,0
+				dec	bc
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jr	nz,CH3_VOL_RELEASE_CNT
+	CH2_VOL_RELEASE		ld	bc,0			; reset counter
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH2_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jr	c,CH3_VOL_RELEASE_CNT
+				ld	(CH2_VOLUME+1),a
+				
+	CH3_VOL_RELEASE_CNT	ld	bc,0
+				dec	bc
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,b
+				or	c
+				jr	nz,BPM_COUNTER
+	CH3_VOL_RELEASE		ld	bc,0			; reset counter
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				ld	a,(CH3_VOLUME+1)
+				sub	4			; decrease volume from 14h to 00h in 5 steps
+				jr	c,BPM_COUNTER
+				ld	(CH3_VOLUME+1),a
+				
+; process BPM counter				
+	BPM_COUNTER		ld	a,BPM_DIVIDER/BPM
+				dec	a
+				ld	(BPM_COUNTER+1),A
+				jp	NZ,END_INT
+				ld	A,BPM_DIVIDER/BPM	; reset BPM divider (IRQfreq/BPM_DIVIDER)/BPM
+				ld	(BPM_COUNTER+1),A
+				
+; parse record							
+	MUSICPOS		ld	HL,MUSIC_DATA-1
+				ld	d,MUS_TBL_HI		; high address of sound frequency constant lookup table
+	MP_CH1			inc	hl
+				ld	a,(hl)			; load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; first byte can be LOOP control
+				jr	nz,MP_SKIP
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; reset music data pointer
+				ld	(MUSICPOS+1),HL
+				jr	MP_CH1			; restart parsing
+				
+	MP_SKIP			cp	SKIP
+				jr	z,MP_CH2		; SKIP -> skip channel 1
+				cp	FRQINC00
+				jr	c,MP_CH1_NEXT1
+				cp	FRQINC0F + 1
+				jr	nc,MP_CH1_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jr	MP_CH2
+	MP_CH1_NEXT1		cp	FRQDEC00
+				jr	c,MP_CH1_NEXT2
+				cp	FRQDEC0F + 1
+				jr	nc,MP_CH1_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC1+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC1+1),hl
+				pop	hl
+				jr	MP_CH2
+	MP_CH1_NEXT2		call	CHECK_RELEASE_CONTROL
+				jr	nz,MP_CH1_NEXT3
+				ld	(CH1_VOL_RELEASE+1),bc
+				jr	MP_CH1
+; handle normal musical note on CH1
+	MP_CH1_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; load frequ constant for CH1
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC1+1),BC		; put into CH1 freq constant in irq handler    
+				ld	a,MASTER_VOLUME_CH1	; new sound -> new volume
+				ld	(CH1_VOLUME+1),a
+				ld	bc,(CH1_VOL_RELEASE+1)
+				ld	(CH1_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH2			inc	hl
+				ld	a,(hl)
+; check control codes for channel 2
+				cp	SKIP
+				jr	z,MP_CH3		; SKIP -> skip channel 2
+				cp	FRQINC00
+				jr	c,MP_CH2_NEXT1
+				cp	FRQINC0F + 1
+				jr	nc,MP_CH2_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jr	MP_CH3
+	MP_CH2_NEXT1		cp	FRQDEC00
+				jr	c,MP_CH2_NEXT2
+				cp	FRQDEC0F + 1
+				jr	nc,MP_CH2_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC2+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC2+1),hl
+				pop	hl
+				jr	MP_CH3
+	MP_CH2_NEXT2		call	CHECK_RELEASE_CONTROL
+				jr	nz,MP_CH2_NEXT3
+				ld	(CH2_VOL_RELEASE+1),bc
+				jr	MP_CH2
+; handle normal musical note on CH2
+	MP_CH2_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH2
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC2+1),BC		; put into CH2 freq constant in irq handler     
+	MOD_VOLUME2		ld	a,MASTER_VOLUME_CH2	; new sound -> new volume
+				ld	(CH2_VOLUME+1),a
+				ld	bc,(CH2_VOL_RELEASE+1)
+				ld	(CH2_VOL_RELEASE_CNT+1),bc
+				
+	MP_CH3			inc	hl
+				ld	a,(hl)
+; check control codes for channel 3
+				cp	SKIP
+				jr	z,MP_END		; SKIP -> skip channel 3
+				cp	FRQINC00
+				jr	c,MP_CH3_NEXT1
+				cp	FRQINC0F + 1
+				jr	nc,MP_CH3_NEXT1
+; INCFREQ0x -> increment frequency
+				sub	FRQINC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				add	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jr	MP_END
+	MP_CH3_NEXT1		cp	FRQDEC00
+				jr	c,MP_CH3_NEXT2
+				cp	FRQDEC0F + 1
+				jr	nc,MP_CH3_NEXT2
+; DECFREQ0x -> decrement frequency
+				sub	FRQDEC00		; A = freq delta / 16
+				rlca
+				push	hl
+				ld	hl,(PAC3+1)
+				ld	b,0
+				ld	c,a
+				or	a			; clear CY
+				sbc	hl,bc
+				ld	(PAC3+1),hl
+				pop	hl
+				jr	MP_END
+	MP_CH3_NEXT2		call	CHECK_RELEASE_CONTROL
+				jr	nz,MP_CH3_NEXT3
+				ld	(CH3_VOL_RELEASE+1),bc
+				jr	MP_CH3
+; handle normal musical note on CH3
+	MP_CH3_NEXT3		ld	e,a
+				sla	e			; low address of sound frequency constant lookup table
+				ld	a,(de)			; load frequ constant for CH3
+				inc	de
+				ld	c,a
+				ld	a,(de)
+				ld	b,a
+				ld	(PAC3+1),BC		; put into CH3 freq constant in irq handler    				
+	MOD_VOLUME3		ld	a,MASTER_VOLUME_CH3	; new sound -> new volume
+				ld	(CH3_VOLUME+1),a
+				ld	bc,(CH3_VOL_RELEASE+1)
+				ld	(CH3_VOL_RELEASE_CNT+1),bc
+				
+	MP_END			ld	(MUSICPOS+1),HL
+	END_INT			pop	HL
+				pop	DE
+				pop	BC
+				pop	AF
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; check and set release control code
+; INPUT: 	A = control code to be look up
+; OUTPUT: 	BC = VOL RELEASE COUNTER if RELEASE00..RELEASE0F code is found
+; 		Z = 1 if found
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	CHECK_RELEASE_CONTROL	cp	ADSR00
+				jr	nz,MP_CH1_NEXT21
+				ld	bc,2			; ~ 7ms
+				ret
+	MP_CH1_NEXT21		cp	ADSR01
+				jr	nz,MP_CH1_NEXT22
+				ld	bc,7			; ~ 24ms
+				ret
+	MP_CH1_NEXT22		cp	ADSR02
+				jr	nz,MP_CH1_NEXT23
+				ld	bc,14			; ~ 49ms
+				ret
+	MP_CH1_NEXT23		cp	ADSR03
+				jr	nz,MP_CH1_NEXT24
+				ld	bc,21			; ~ 74ms
+				ret
+	MP_CH1_NEXT24		cp	ADSR04
+				jr	nz,MP_CH1_NEXT25
+				ld	bc,33			; ~ 116ms
+				ret
+	MP_CH1_NEXT25		cp	ADSR05
+				jr	nz,MP_CH1_NEXT26
+				ld	bc,48			; ~ 169ms
+				ret
+	MP_CH1_NEXT26		cp	ADSR06
+				jr	nz,MP_CH1_NEXT27
+				ld	bc,58			; ~ 204ms
+				ret
+	MP_CH1_NEXT27		cp	ADSR07
+				jr	nz,MP_CH1_NEXT28
+				ld	bc,68			; ~ 240ms
+				ret
+	MP_CH1_NEXT28		cp	ADSR08
+				jr	nz,MP_CH1_NEXT29
+				ld	bc,85			; ~ 300ms
+				ret
+	MP_CH1_NEXT29		cp	ADSR09
+				jr	nz,MP_CH1_NEXT2A
+				ld	bc,213			; ~ 752ms
+				ret
+	MP_CH1_NEXT2A		cp	ADSR0A
+				jr	nz,MP_CH1_NEXT2B
+				ld	bc,425			; ~ 1501ms
+				ret
+	MP_CH1_NEXT2B		cp	ADSR0B
+				jr	nz,MP_CH1_NEXT2C
+				ld	bc,680			; ~ 2402ms
+				ret
+	MP_CH1_NEXT2C		cp	ADSR0C
+				jr	nz,MP_CH1_NEXT2D
+				ld	bc,850			; ~ 3002ms
+				ret
+	MP_CH1_NEXT2D		cp	ADSR0D
+				jr	nz,MP_CH1_NEXT2E
+				ld	bc,2548			; ~ 9001ms
+				ret
+	MP_CH1_NEXT2E		cp	ADSR0E
+				jr	nz,MP_CH1_NEXT2F
+				ld	bc,4246			; ~ 15000ms
+				ret
+	MP_CH1_NEXT2F		cp	ADSR0F
+				ret	nz
+				ld	bc,6794			; ~ 24001ms
+				ret
+				
+;******************************************************************
+; INIT MUSIC MIXER INTERRUPT HANDLER
+;******************************************************************
+	IT_HANDLER_1		db	00h
+	IT_HANDLER_2		dw	0000h
+				
+	START_MUSIC_MIXER	ld	A,BPM_DIVIDER/BPM
+				ld	(BPM_COUNTER+1),A
+				ld	A,DURATION_IRQ_CONST
+				ld	(DURATION_COUNTER+1),A
+				ld	HL,MUSIC_DATA-1		; -1 is needed because parsing is started with inc hl
+				ld	(MUSICPOS+1),HL
+				ld	(MUSIC_RESTART+1),HL
+				ld	A,10			; disable CRTC CURSOR IT
+				out	(112),A
+				ld	A,35
+				out	(113),A
+				ld	A,$D9			; Sound IT counter divider LO
+				out	(4),A			; IT frequency = Fsys / 16 / 39 = ~ 5008 Hz (4096 - 39 = 4057 = $0FD9)
+				ld	A,32+$0F		; Sound IT enabled, sound is OFF + divider HI
+				out	(5),A			; 
+				ld	A,(0038h)		; SAVE IT HANDLER
+				ld	(IT_HANDLER_1),A
+				ld	HL,(0039h)
+				ld	(IT_HANDLER_2),HL
+				ld	A,0C3h			; @038h -> JP Address_of_IT_HANDLER
+				ld	(0038h),A
+				ld	HL,IT_HANDLER
+				ld	(0039H),HL
+				ei				; enable interrupt
+				ret
+				
+;******************************************************************
+; RESTORE INTERRUPT HANDLER
+;******************************************************************
+	STOP_MUSIC_MIXER	di
+				ld	A,10			; restore the original interrupt
+				out	(112),A
+				ld	A,3
+				out	(113),A			; CURSOR IT enabled
+				xor	A
+				out	(4),A
+				out	(5),A			; Sound IT disabled, Sound is OFF
+				ld	A,(IT_HANDLER_1)	; RESTORE IT HANDLER
+				ld	(0038h),A
+				ld	HL,(IT_HANDLER_2)
+				ld	(0039h),HL
+				ld	hl,0
+				ld	(PAC1+1),hl
+				ld	(PAC2+1),hl
+				ld	(PAC3+1),hl
+				ret
+				
+				
+	MUS_TBL_HI		equ	$1D
+				org	$1D00
+; Freq divider table for musical sounds 5008Hz IRQ
+	SOUND_TABLE_5008	dw	0			; 0.00 Hz
+				dw	428			; C1	32.7 Hz
+				dw	453			; CISZ1	34.65 Hz
+				dw	480			; D1	36.71 Hz
+				dw	509			; DISZ1	38.89 Hz
+				dw	539			; E1	41.2 Hz
+				dw	571			; F1	43.65 Hz
+				dw	605			; FISZ1	46.25 Hz
+				dw	641			; G1	49 Hz
+				dw	679			; GISZ1	51.91 Hz
+				dw	720			; A1	55 Hz
+				dw	763			; AISZ1	58.27 Hz
+				dw	808			; B1	61.74 Hz
+				dw	856			; C2	65.41 Hz
+				dw	907			; CISZ2	69.3 Hz
+				dw	961			; D2	73.42 Hz
+				dw	1018			; DISZ2	77.78 Hz
+				dw	1078			; E2	82.41 Hz
+				dw	1143			; F2	87.31 Hz
+				dw	1210			; FISZ2	92.5 Hz
+				dw	1282			; G2	98 Hz
+				dw	1359			; GISZ2	103.83 Hz
+				dw	1439			; A2	110 Hz
+				dw	1525			; AISZ2	116.54 Hz
+				dw	1616			; B2	123.47 Hz
+				dw	1712			; C3	130.81 Hz
+				dw	1814			; CISZ3	138.59 Hz
+				dw	1921			; D3	146.83 Hz
+				dw	2036			; DISZ3	155.56 Hz
+				dw	2157			; E3	164.81 Hz
+				dw	2285			; F3	174.61 Hz
+				dw	2421			; FISZ3	185 Hz
+				dw	2565			; G3	196 Hz
+				dw	2717			; GISZ3	207.65 Hz
+				dw	2879			; A3	220 Hz
+				dw	3050			; AISZ3	233.08 Hz
+				dw	3232			; B3	246.94 Hz
+				dw	3424			; C4	261.63 Hz
+				dw	3627			; CISZ4	277.18 Hz
+				dw	3843			; D4	293.66 Hz
+				dw	4072			; DISZ4	311.13 Hz
+				dw	4314			; E4	329.63 Hz
+				dw	4570			; F4	349.23 Hz
+				dw	4842			; FISZ4	369.99 Hz
+				dw	5130			; G4	392 Hz
+				dw	5435			; GISZ4	415.3 Hz
+				dw	5758			; A4	440 Hz
+				dw	6100			; AISZ4	466.16 Hz
+				dw	6463			; B4	493.88 Hz
+				dw	6847			; C5	523.25 Hz
+				dw	7255			; CISZ5	554.37 Hz
+				dw	7686			; D5	587.33 Hz
+				dw	8143			; DISZ5	622.25 Hz
+				dw	8627			; E5	659.25 Hz
+				dw	9140			; F5	698.46 Hz
+				dw	9684			; FISZ5	739.99 Hz
+				dw	10259			; G5	783.99 Hz
+				dw	10870			; GISZ5	830.61 Hz
+				dw	11516			; A5	880 Hz
+				dw	12201			; AISZ5	932.33 Hz
+				dw	12926			; B5	987.77 Hz
+				dw	13695			; C6	1046.5 Hz
+				dw	14509			; CISZ6	1108.73 Hz
+				dw	15372			; D6	1174.66 Hz
+				dw	16286			; DISZ6	1244.51 Hz
+				dw	17254			; E6	1318.51 Hz
+				dw	18280			; F6	1396.91 Hz
+				dw	19367			; FISZ6	1479.98 Hz
+				dw	20519			; G6	1567.98 Hz
+				dw	21739			; GISZ6	1661.22 Hz
+				dw	23032			; A6	1760 Hz
+				dw	24401			; AISZ6	1864.66 Hz
+				dw	25852			; B6	1975.53 Hz
+				dw	27389			; C7	2093 Hz
+				dw	0			; 0 Hz
+				
+;******************************************************************
+; MAIN PROGRAM
+;******************************************************************
+; developer could set this constants
+				
+	BPM			equ	884			; <- set the Beat per Minutes (BPM) HERE
+				
+	MASTER_VOLUME_CH1	equ	$14			; can be: $14,$10,$0C,$08,$04,$00			
+	MASTER_VOLUME_CH2	equ	$0C			; can be: $14,$10,$0C,$08,$04,$00			
+	MASTER_VOLUME_CH3	equ	$14			; can be: $14,$10,$0C,$08,$04,$00
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   		
+	DURATION_IRQ_CONST	equ	6
+	BPM_DIVIDER		equ	8491/DURATION_IRQ_CONST*10
+				
+	MAIN			di				; IT disabled
+				exx				; save registers
+				push	HL
+				push	BC
+				push	DE
+				exx
+				push	IX
+				push	IY
+;===============================				
+; GRAPHICS ELŐKÉSZÍTÉS				
+;===============================
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás	
+; set border 						
+				xor	a
+				out	(0),A			; keret színe fekete
+; set palette				
+				ld	A,$00			; fekete       
+				out	($60),A
+				ld	A,$55			; fehér         
+				out	($61),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$01			; sötétkék       
+				out	($63),A
+							
+;===============================				
+; INTRO TEXT SCENE			
+;===============================				
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				call	CLS
+				ld	hl,IMUSIC_DATA_ZX7
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				call	INTRO_TEXT
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR and MUSIC PLAYER INTERRUPT
+				
+	wft2:			ld	hl,38000		;waitfor info text
+				dec	hl
+				ld	(wft2+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft2
+				call	Clrscr
+				call	STOP_MUSIC_MIXER
+				ld	a,$14
+				ld	(MOD_VOLUME2+1),a
+				ld	a,$0C
+				ld	(MOD_VOLUME3+1),a
+				
+;===============================				
+; LINES TITLE SCENE				
+;===============================				
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				ld	a,2
+				ld	(GR_MODE+1),a		; GRAPHICS 16
+				out	(6),a
+				
+				ld	hl,MUSIC_DATA_ZX7
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				
+				ld	hl,PIC_TITLE_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				
+	wft3:			ld	hl,0			; hatásvadász szünet
+				dec	hl
+				ld	(wft3+1),hl
+				ld	a,h
+				or	l
+				nop
+				jp	nz,wft3
+				
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				call	START_MUSIC_MIXER	; starts SOUND GENERATOR and MUSIC PLAYER INTERRUPT
+				call	DEMO_START
+				call	Clrscr
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva				
+;===============================				
+; TVC40 + Fast&Force SCENE
+;===============================                                 
+				ld	a,1
+				ld	(GR_MODE+1),a		; GRAPHICS 4
+				ld	hl,PIC_TVC40_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+				
+	wft4:			ld	hl,11000		;waitfor title
+				dec	hl
+				ld	(wft4+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft4
+				call	Clrscr
+;===============================				
+; NO AI SCENE
+;===============================                                 	
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				ld	A,$44			; piros  
+				out	($63),A
+				ld	hl,PIC_NOAI_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+	wft5:			ld	hl,14500		;wait
+				dec	hl
+				ld	(wft5+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft5
+				call	Clrscr
+;===============================				
+; TOAD SCENE
+;===============================                                 	
+				call	CRTC_DISABLE		; CRTC megjelenítés letiltva
+				ld	A,$00			; fekete  
+				out	($62),A
+				ld	A,$55			; fehér szem
+				out	($63),A
+				ld	hl,PIC_TOAD_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				
+	wft6:			ld	hl,14500		;wait
+				dec	hl
+				ld	(wft6+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft6
+				
+				ld	A,$44			; piros szem
+				out	($63),A
+				
+	wft7:			ld	hl,14500		;wait
+				dec	hl
+				ld	(wft7+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft7
+				
+	wft8:			ld	hl,15500		;wait
+				ld	a,r
+				out	(0),a
+				dec	hl
+				ld	(wft8+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft8
+				
+				ld	A,$50			; zöld  PLACSNI
+				out	($62),A
+				
+				ld	BC,$1502		; "AND MORE..." kiírása
+				call	RST30DB3
+				ld	DE,more_szoveg		;szöveg címe
+				call	RST30DB2
+				
+	wft9:			ld	hl,14500		;wait
+				ld	a,r
+				out	(0),a
+				dec	hl
+				ld	(wft9+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wft9
+				
+				xor	a
+				out	(0),a
+				
+				ld	BC,$1502		; "AND MORE..." törlése
+				call	RST30DB3
+				ld	DE,more_szoveg_del	;szöveg címe
+				call	RST30DB2
+				
+				call	DEMO_TOAD
+;===============================				
+; WHITE NOISE SCENE
+;===============================                                 			
+				call	Clrscr
+				call	CLS
+; LINES DEMO				
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$01			; sötétkék       
+				out	($63),A
+				
+				call	LINES_DEMO1
+				call	NOISE_GENERATOR
+				call	Clrscr
+;===============================				
+; KALEIDOCOPE SCENE
+;===============================  
+				ld	a,2
+				ld	(GR_MODE+1),a		; GRAPHICS 16
+				out	(6),a
+				call	KALEIDOSCOPE
+				call	Clrscr
+				call	CLS
+;===============================				
+; LAST PLASMA SCENE
+;===============================                                 							
+				call	DEMO_TOAD
+				call	Clrscr
+;===============================				
+; BIRTHDAY + GREETINGS SCENE
+;===============================                                 							
+				ld	a,1
+				ld	(GR_MODE+1),a		; GRAPHICS 4
+				call	CRTC_DISABLE
+				call	STOP_MUSIC_MIXER	; stops SOUND GENERATOR INTERRUPT
+				
+				ld	hl,EMUSIC_DATA_ZX7
+				ld	de,MUSIC_DATA
+				call	ZX7_DECOMPRESS
+				ld	hl,PIC_END_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	END_TEXT
+				
+	wft11:			ld	hl,4000			;wait
+				dec	hl
+				ld	(wft11+1),hl
+				ld	a,h
+				or	l
+				jp	nz,wft11
+				
+				
+				call	CRTC_ENABLE		; CRTC megjelenítés engedélyezve
+				call	START_MUSIC_MIXER
+				
+	wft10:			ld	hl,12000		;ENDPIC
+				dec	hl
+				ld	(wft10+1),hl
+				ld	a,h
+				or	l
+				halt
+				halt
+				halt
+				halt
+				halt
+				jp	nz,wft10
+				
+				call	MUSIC_BY_TEXT
+				
+	wft12:			ld	hl,12000		;ENDPIC
+				dec	hl
+				ld	(wft12+1),hl
+				ld	a,h
+				or	l
+				halt
+				halt
+				halt
+				halt
+				halt
+				jp	nz,wft12
+				
+				
+				
+				call	Clrscr
+				call	STOP_MUSIC_MIXER
+;===============================				
+; FINAL FAF LOGO SCENE
+;===============================                                 			
+				ld	A,$00			; fekete       
+				out	($60),A
+				ld	A,$55			; fehér         
+				out	($61),A
+				ld	A,$41			; kék  
+				out	($62),A
+				ld	A,$01			; sötétkék       
+				out	($63),A
+				ld	hl,PIC_TVC40_ZX7
+				ld	de,$8000
+				call	ZX7_DECOMPRESS
+				call	DEMO_START
+				call	Clrscr
+				
+	DEMO_VEGE:		jp	DEMO_VEGE
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+	END_OF_GAME		call	STOP_MUSIC_MIXER	; stops SOUND GENERATOR INTERRUPT				
+				pop	IY			; restore registers
+				pop	IX
+				exx
+				pop	DE
+				pop	BC
+				pop	HL
+				exx
+				ei
+				ret				; end of game
+				
+;--------------------------------------------------------------------------------------------------------------------------------------                                   				
+	INTRO_TEXT:		
+				ld	BC,$0208		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg		;szöveg címe
+				call	RST30DB2
+				ld	BC,$0209		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg+32	;szöveg címe
+				call	RST30DB2
+				ld	BC,$020C		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg+64	;szöveg címe
+				call	RST30DB2
+				ld	BC,$020D		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg+96	;szöveg címe
+				call	RST30DB2
+				ld	BC,$0210		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg+128	;szöveg címe
+				call	RST30DB2
+				ld	BC,$0211		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,intro_szoveg+160	;szöveg címe
+				call	RST30DB2
+				ret
+				
+	END_TEXT:		call	CLS_KE
+				ld	BC,$010B		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,end_szoveg		;szöveg címe
+				call	RST30DB2
+				ld	BC,$010C		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,end_szoveg+33	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010D		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,end_szoveg+66	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010E		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,end_szoveg+99	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010F		; X,Y karakter pozíció
+				call	RST30DB3
+				ret
+				
+	MUSIC_BY_TEXT:		call	CLS_KE
+				ld	BC,$010B		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,music_by_szoveg	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010C		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,music_by_szoveg+33	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010D		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,music_by_szoveg+66	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010E		; X,Y karakter pozíció
+				call	RST30DB3
+				ld	DE,music_by_szoveg+99	;szöveg címe
+				call	RST30DB2
+				ld	BC,$010F		; X,Y karakter pozíció
+				call	RST30DB3
+				ret
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; CRTC routines
+				
+	CRTC_DISABLE		ld	A,1			; CRTC disable screen
+				out	(112),A
+				ld	A,0
+				out	(113),A
+				ret
+				
+	CRTC_ENABLE		ld	A,1			; CRTC enable screen
+				out	(112),A
+				ld	A,64
+				out	(113),A
+				ret
+				
+; Clear Screen (fill entire screen with 0)
+				
+	CLS			ld	hl,$8000
+				ld	bc,$3FFF
+				ld	d,0
+	cls_loop		ld	(hl),d
+				inc	hl
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,cls_loop
+				ret
+				
+	CLS_KE			ld	hl,$9800
+				ld	bc,$0C00
+				ld	d,0
+	cls_loop_ka		ld	(hl),d
+				inc	hl
+				dec	bc
+				ld	a,b
+				or	c
+				jp	nz,cls_loop_ka
+				ret
+				
+;-------------------------------------------------------------------------------------------------------------------------------------- 
+; Clear Screen (tricky clear screen (atomization)
+				
+	SAVE_BC:		dw	$00
+	SAVE_HL:		dw	$00
+				
+	Clrscr:			ld	A,$00			; color = BLACK
+				ld	HL,$7F00
+				ld	B,$06
+	CLRSCR0:		ld	(SAVE_BC),BC
+				ld	(SAVE_HL),HL
+				ld	B,$2A
+	CLRSCR1:		ld	C,B
+				ld	B,$41
+	CLRSCR2:		ld	(HL),A
+				inc	HL
+				inc	HL
+				inc	HL
+				djnz	CLRSCR2
+				ld	DE,$00C0
+				add	HL,DE
+				ld	B,C
+				djnz	CLRSCR1
+				ld	HL,(SAVE_HL)
+				ld	DE,$0041
+				add	HL,DE
+				ld	BC,(SAVE_BC)
+				djnz	CLRSCR0
+				ret
+				
+;******************************************************************
+; Draw characters
+; precondition: VID page is at $8000 
+;******************************************************************	
+	SCREEN_WIDTH		equ	64			; képernyő szélessége bájtokban
+	SCREEN_HEIGHT		equ	240
+	END_OF_TEXT		equ	255			; ez a kód jelzi a szöveg végét
+	CHAR_SET_IMAGE_WIDTH	equ	192			; karakterkészlet image szélessége bájtokban
+	CHAR_SET_IMAGE_HEIGHT	equ	10			; karakterkészlet image magassága pixelekben			
+				
+	CHAR_HEIGHT		db	0
+	VRAM_POSITION		dw	$8000
+				
+	RST30DB3		dec	b			; can be called replacing rst $30 with db $3
+				sla	b			; x2 for 4 color mode
+				dec	c			; see TVC ROM manual page 176
+				ld	a,c
+				add	a,a
+				add	a,a
+				add	a,c
+				add	a,a
+				ld	h,a
+				xor	a
+				srl	h
+				rra
+				scf
+				rr	h
+				rra
+				or	b
+				ld	l,a			; HL = $8000 + (sor * 10) * 64 + oszlop
+				ld	(VRAM_POSITION),hl
+				ret
+				
+	RST30DB2		ld	(WRITE_TEXT+1),de	; can be called replacing rst $30 with db $2
+				ld	de,(VRAM_POSITION)
+				
+				;{ ---------- WRITE_TEXT
+				; from TVC lemezújság tech demo - (c) Bertók Zsolt, BerySoft - 2023
+                              	; szöveg kiírása saját karakterkészlettel
+                              	; paraméterek: 	DE -> képernyő (VRAM) pozíció; 
+				; 		(WRITE_TEXT+1) <- a szöveg címe
+				; hasznája AF, BC, DE, HL
+	WRITE_TEXT		ld	A,(0)			; A = a szöveg karaktere
+				or	A			; A == 0?
+				ret	z			; Ha A = 0, akkor ez a sor vége, visszatérünk a hívóhoz
+				cp	END_OF_TEXT		; A = END_OF_TEXT?
+				ret	z			; Ha A = END_OF_TEXT, akkor ez a szöveg vége, visszatérünk a hívóhoz
+				ld	HL,CHAR_SET		; HL -> CHAR_SET image
+				;{ karakter típusának elemzése
+				cp	32			; a karakter alacsonyabb kódú, mint a szóköz?
+				jp	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki
+				cp	58			; kisebb, mint a 9 utáni karakter?
+				jp	c,WRITE_TEXT_SPACE_TO_9	; ha igen, akkor szóköztől és 9 közötti karakter
+				cp	"["			; Z vagy kisebb karakter
+				jp	c,WRITE_TEXT_A_Z	; ha igen, akkor kiírjuk
+				cp	123			; kisebb, mint a "z" utáni karakter?
+				jp	c,WRITE_TEXT_SMALL_A_Z	; ha igen, akkor kiírjuk
+				cp	144			; 144 az "á" betű kódja
+				jp	nc,WT_SMALL_ACCENTED_A_Z; ha A >= 144, akkor ugrás a kis ékezetes betűk kiírására
+				;}
+                              	;{ nagy ékezetes karakterek - Á,É,Í,Ó,Ö,Ő,Ú,Ü,Ű				
+				cp	137			; 137 az "Ű" betű utáni karakter kódja
+				jp	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 137, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26)*2	; a SPACE-"/","0"-"9","A"-"Z","a"-"z" karaktereket átlépjük
+				add	HL,BC			; HL az "Á" betű képdarabjára mutat			
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (nagy ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	128			; a kiírandó karakter kódjából kivonjuk az "Á" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "Á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben     
+				;}
+				;{ kis ékezetes karakterek - á,é,í,ó,ö,ő,ú,ü,ű
+	WT_SMALL_ACCENTED_A_Z	cp	153			; 153 az "ű" betű utáni karakter kódja
+				jp	nc,WRITE_TEXT_SKIP_CHAR	; ha A >= 153, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10+26+26+9)*2	; a SPACE-'/","0"-"9","A"-"Z","a"-"z","Á"-"Ű" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-2; ennyi pixel magas egy karakter (kis ékezetes betűknél az utolsó 2 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	144			; a kiírandó karakter kódjából kivonjuk az "á" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "á" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem, akkor kiszámoljuk az aktuális ékezetes karakter kezdő címét a CHARSET-ben
+				;}
+				;{ SPACE-"/" + "0"-"9"
+	WRITE_TEXT_SPACE_TO_9	push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (szóköztől a nagy "9"-ig az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	32			; a kiírandó karakter kódjából kivonjuk a szóköz kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}				
+				;{ A-Z-ig karakterek
+	WRITE_TEXT_A_Z		cp	"A"			; "A" betűnél kisebb kód?
+				jp	c,WRITE_TEXT_SKIP_CHAR	; ha igen, akkor nem írjuk ki a karaktert
+				ld	BC,(16+10)*2		; a SPACE-'/","0"-"9" karaktereket átlépjük
+				add	HL,BC			; HL az "á" betű képdarabjára mutat
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT-1; ennyi pixel magas egy karakter (az utolsó 1 sor üres)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"A"			; a kiírandó karakter kódjából kivonjuk az "A" betű kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "A" betű, mivel éppen arra mutat HL, ugrás a kiírására
+				jp	WT_SET_CHAR_ADDR	; ha nem nulla, akkor ugrás a karakter kezdőcímének kiszámolására
+				;}
+				;{ kis a-z karakterek
+	WRITE_TEXT_SMALL_A_Z	ld	BC,(16+10+26)*2		; a SPACE-"/","0"-"9","A"-"Z" karaktereket átlépjük
+				add	HL,BC			; HL -> "a"
+				push	af
+				ld	a,CHAR_SET_IMAGE_HEIGHT	; ennyi pixel magas egy karakter (p, q, y teljesen leér a 10. sorig)
+				ld	(CHAR_HEIGHT),a
+				pop	af
+				sub	"a"			; a kiírandó karakter kódjából kivonjuk az "a" kódját
+				jp	Z,WRITE_TEXT_CHAR	; ha nulla a végeredmény, akkor ez egy "a", mivel éppen arra mutat HL, ugrás a kiírására				
+				;}
+				;{ a karakter kezdőcímének kiszámolása a karakterkészlet image-ben
+	WT_SET_CHAR_ADDR	add	A,A			; A = A * 2 -> 1 karakter 2 byte
+				ld	C,A
+				ld	B,0			; BC = A * 2
+				add	HL,BC			; HL a karakter első sorának első byte-jára mutat a karakterkészlet image-ben
+				;}
+                              	;{ egy karakter kiírása (DE: képernyő (VRAM) pozíció; HL: karakter image cím; C: karakter magasság pixelben)
+	WRITE_TEXT_CHAR		push	DE			; karakter képernyő (VIDEORAM) pozíciójának elrakása a STACK-re                              
+				ld	A,(CHAR_HEIGHT)		; ennyi pixel magas egy karakter
+	WRITE_TEXT_CHAR_LOOP	ld	BC,CHAR_SET_IMAGE_WIDTH	; ennyi byte széles a karakterkészletett tartalmazó image
+				push	af
+				ld	a,(hl)			; LDI
+	color_and_value_1	nop
+				nop
+				nop
+				nop
+				nop
+				nop
+				ld	(de),a
+				inc	de
+				inc	hl
+				dec	bc
+				ld	a,(hl)			; LDI
+	color_and_value_2	nop
+				nop
+				nop
+				nop
+				nop
+				nop
+				ld	(de),a
+				inc	de
+				inc	hl
+				dec	bc
+				pop	af
+				add	HL,BC			; HL -> következő sor a karakterkészletben
+				ex	DE,HL
+				ld	BC,SCREEN_WIDTH-2	; következő sorig ennyit kell lépni a képernyőn (a -2 a kirakott karakter egy sora)
+				add	HL,BC
+				res	6,H			; Ha a 6. bit 1, akkor 48K fölé ért a címzés, ezért azt töröljük, így mindig 32K-48K között lesz HL értéke
+				;set	7,H			; Beállítjuk a 7. bitet, hogy HL értéke ne kerülhessen 32K alá a csökkentés következtében, így nem megy a VIDEORAM alá a címzés
+				ex	DE,HL			; DE: a következő sorra mutat a képernyőn
+				dec	A			; kirakandó sorok csökkentése
+				jp	NZ,WRITE_TEXT_CHAR_LOOP	; ha nem nulla, akkor ugrás a folytatásra                              
+				pop	DE			; a most kirakott karakter képernyő (VRAM) pozíciójának előszedése a STACK-ről
+				;}
+                              	;{ a szöveg következő karakterére lépés
+	WRITE_TEXT_NEXT_CHAR	inc	DE			; egy karakternyi (2 byte)
+				inc	DE			; hely átlépése a képernyőn
+	WRITE_TEXT_SKIP_CHAR	ld	hl,(WRITE_TEXT+1)
+				inc	hl			; IX a szöveg következő karakterére mutat
+				ld	(WRITE_TEXT+1),hl
+				jp	WRITE_TEXT		; ugrás a kiírás elejére
+				
+				
+	; CHAR_SET - 768x10 pixels; 384x10 byte; 96 karakter x 10 sor; 1 karakter: 2 byte x 10 pixel
+	CHAR_SET		db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,32,0,16,0,16,0,80,0,32,128,16,0,80,0,32,128,16,0,0,128,16,0,16,0,0,0,32,128,16,0,0,0,32,128
+				db	0,0,0,0,160,0,0,0,32,0,0,0,0,0,64,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,128,0,0,16,128,0,0,128,0,32,0,16,0,128,0,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,64,0,32,0,32,0,0,0,80,0,32,0,0,0,80,0,32,0,16,0,32,0,32,0,80,0,80,0,32,0,80,0,80,0
+				db	0,0,128,0,160,0,64,128,112,128,192,64,32,0,64,0,32,0,128,0,0,0,0,0,0,0,0,0,0,0,0,64,112,0,96,0,112,0,112,0,48,0,240,128,112,128,240,128,112,0,112,0,112,0,240,0,112,128,240,0,240,128,240,128,112,128,128,128,240,128,240,0,144,0,128,0,128,128,128,128,112,0,240,0,112,0,240,0,112,128,240,128,128,64,128,128,128,128,128,128,128,128,240,128,0,0,128,0,0,0,0,128,0,0,32,0,0,0,128,0,0,0,0,0,128,0,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,112,0,240,0,112,0,112,0,112,0,112,0,128,128,128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,128,0,0,0,240,192,160,0,192,128,80,0,128,0,64,0,64,0,160,128,32,0,0,0,0,0,0,0,0,128,128,128,160,0,128,128,128,128,80,0,128,0,128,0,0,128,128,128,128,128,128,128,128,128,128,0,128,128,128,0,128,0,128,0,128,128,32,0,16,0,160,0,128,0,208,128,192,128,128,128,128,128,128,128,128,128,128,0,32,0,128,64,128,128,160,128,80,0,80,0,0,128,240,0,176,0,112,128,112,128,112,0,240,128,112,128,176,128,96,0,112,0,144,0,16,0,80,0,176,0,112,0,176,0,112,128,176,128,112,128,240,128,128,128,128,128,128,128,128,128,128,64,240,128,128,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,240,0,112,0,96,0,112,0,112,0,112,0,128,128,128,128,128,128
+				db	0,0,128,0,0,0,64,128,112,0,16,0,96,0,0,0,128,0,32,0,112,0,32,0,0,0,240,128,0,0,16,0,128,128,32,0,0,128,48,0,144,0,240,0,240,0,16,0,112,0,128,128,240,128,240,0,128,0,128,128,240,0,240,0,144,128,240,128,32,0,16,0,192,0,128,0,160,128,160,128,128,128,128,128,128,128,128,128,112,0,32,0,128,64,80,0,160,128,32,0,80,0,16,0,0,128,192,128,128,0,128,128,128,128,32,0,128,128,192,128,32,0,16,0,160,0,16,0,160,128,192,128,128,128,192,128,128,128,192,128,128,0,32,0,128,128,128,128,128,128,80,0,64,128,16,0,128,128,224,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,0,128,128,128,32,0,128,128,128,128,128,128,128,128,128,128,128,128
+				db	0,0,128,0,0,0,64,128,32,128,32,0,160,128,0,0,128,0,32,0,240,128,240,128,0,0,0,0,0,0,32,0,128,128,32,0,48,0,0,128,240,128,0,128,128,128,32,0,128,128,112,128,128,128,128,128,128,0,128,128,128,0,128,0,128,128,128,128,32,0,16,0,160,0,128,0,160,128,144,128,128,128,240,0,128,128,240,0,0,128,32,0,128,64,80,0,240,128,80,0,32,0,32,0,112,128,128,128,128,0,128,128,240,128,32,0,128,128,128,128,32,0,16,0,192,0,16,0,160,128,128,128,128,128,128,128,128,128,128,0,112,0,32,0,128,128,80,0,160,128,32,0,64,128,32,0,240,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,112,128,240,128,32,0,128,128,128,128,128,128,128,128,128,128,128,128
+				db	0,0,0,0,0,0,240,192,240,0,64,192,144,0,0,0,64,0,64,0,112,0,32,0,0,0,0,0,192,0,64,0,128,128,32,0,192,0,128,128,16,0,0,128,128,128,64,0,128,128,0,128,128,128,128,128,128,0,128,128,128,0,128,0,128,128,128,128,32,0,16,0,144,0,128,0,128,128,144,128,128,128,128,0,128,128,144,0,0,128,32,0,128,64,80,0,80,0,128,128,32,0,192,0,128,128,128,128,128,0,144,128,128,0,32,0,144,128,128,128,32,0,16,0,160,0,16,0,160,128,128,128,128,128,128,128,144,128,128,0,0,128,32,0,144,128,80,0,160,128,80,0,48,0,64,0,128,128,128,0,32,0,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,0,32,0,128,128,128,128,128,128,144,128,144,128,144,128
+				db	0,0,128,0,0,0,64,128,32,0,128,192,96,128,0,0,32,0,128,0,160,128,32,0,128,0,0,0,192,0,128,0,112,0,240,128,240,128,112,0,16,0,240,0,112,0,64,0,112,0,240,0,128,128,240,0,112,128,240,0,240,128,128,0,112,128,128,128,240,128,224,0,128,128,240,0,128,128,128,128,112,0,128,0,112,0,128,128,240,0,32,0,112,128,32,0,80,0,128,128,32,0,240,128,112,64,240,0,112,128,96,128,112,128,32,0,96,128,128,128,32,0,16,0,144,0,16,0,160,128,128,128,112,0,240,0,96,128,128,0,240,0,16,128,224,128,32,0,80,0,128,128,48,0,240,128,128,128,240,0,112,0,112,0,112,0,112,0,112,0,112,0,112,0,112,64,112,128,32,0,112,0,112,0,112,0,224,128,224,128,224,128
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,16,0,0,0,0,0,0,0,0,0,0,0,128,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,112,0,0,0,0,0,224,0,0,0,0,0,0,0,0,0,0,0,128,0,0,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+				
+	intro_szoveg		db	'   THE VIDEOTON TV COMPUTER   ',0,0
+				db	'        IS 40 YEARS OLD       ',0,0
+				db	' NO SOUND CHIP,  NO VIDEO CHIP',0,0
+				db	'     JUST A Z80 PROCESSOR     ',0,0
+				db	'    LET US SALUTE  THE TVC    ',0,0
+				db	'   MAKING THE CPU WORK HARD   ',0
+				
+	end_szoveg		db	'            GREETINGS           ',0
+				db	' BadCode64,Geco,DoberdoBrothers ',0
+				db	' BerySoft,AnyStone,Orosz Olivér ',0
+				db	' Murphy,KKS2003,Nickmann Studio ',0
+				
+	music_by_szoveg		db	'             MUSIC BY           ',0
+				db	'THE MUSIC WAS CONVERTED FROM C64',0
+				db	'   SID TUNES MADE BEFORE 1995   ',0
+				db	'  THNX TO deepsid.chordian.net  ',0
+				
+				
+				
+				
+				
+	more_szoveg		db	'AND MORE...',0
+	more_szoveg_del		db	'           ',0
+;--------------------------------------------------------------------------------------------------------------------------------------  
+; HORIZONTAL ONLY LINE_DRAW				
+	SCREEN_W		equ	64
+	SCREEN_H		equ	200
+	VRAM_BASE		equ	$8000
+				
+; változók
+	x1_var			db	0
+	y1_var			db	0
+	x2_var			db	0
+	y2_var			db	0
+	dx_var			db	0
+	dy_var			db	0
+	sx_var			dw	0
+	sy_var			dw	0
+	err_var			dw	0
+				
+	err_w			dw	0			; 16 bites hibaterm
+	cur_pos			dw	0			; aktuális VRAM cím (HL-hez)
+				
+;Minden változó 8 bites, mivel a képernyő koordináták 0–63 és 0–199.
+				
+	LINE_DRAW_V1:		ld	a,r
+				ld	(color_var+1),a
+				cp	55
+				jp	nz,ldv1_n
+				dec	a
+;DX, DY és SX, SY kiszámítása
+; dx = x2 - x1
+	ldv1_n:			ld	a,(x2_var)
+				ld	b,a
+				ld	a,(x1_var)
+				sub	b
+				jp	p,DX_OK
+				neg
+	DX_OK:			
+				ld	(dx_var),a
+				
+; dy = y2 - y1
+				ld	a,(y2_var)
+				ld	b,a
+				ld	a,(y1_var)
+				sub	b
+				jp	p,DY_OK
+				neg
+	DY_OK:			
+				ld	(dy_var),a
+				
+; sx = (x2 >= x1) ? 1 : -1
+				ld	a,(x2_var)
+				ld	b,a
+				ld	a,(x1_var)
+				cp	b
+				jp	c,SX_Plus
+				ld	a,$FF
+				jp	SX_Store
+	SX_Plus:		
+				ld	a,1
+	SX_Store:		
+				ld	(sx_var),a
+				
+; sy = (y2 >= y1) ? 1 : -1
+				ld	a,(y2_var)
+				ld	b,a
+				ld	a,(y1_var)
+				cp	b
+				jp	c,SY_Plus
+				ld	a,$FF
+				jp	SY_Store
+	SY_Plus:		
+				ld	a,1
+	SY_Store:		
+				ld	(sy_var),a
+				
+;Hibaváltozó (err = dx - dy) kiszámítása
+				ld	a,(dx_var)
+				ld	l,a
+				ld	h,0
+				ld	a,(dy_var)
+				sub	a			; itt hibát számolunk: err = dx - dy
+				ld	(err_var),a
+				
+				
+; determine 				
+				
+	LineLoop:		
+; rajzolunk pixel
+				ld	a,(y1_var)		; Y*64 = Y*2^6 = 6xADD HL,HL
+				ld	l,a
+				ld	h,0
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				ld	a,(x1_var)
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				ld	de,VRAM_BASE
+				add	hl,de
+				
+				ld	a,(hl)
+				or	a
+				jp	nz,CheckEnd
+	color_var:		ld	a,$ff
+				
+				ld	(hl),a
+				
+; ha elértük a végpontot, kilépünk
+	CheckEnd:		
+				ld	a,(dx_var)
+				ld	b,a
+				ld	a,(dy_var)
+				cp	b
+				jp	nc,CheckXend		; ha dx >= dy › X domináns
+				jp	CheckYend		; ha dy > dx › Y domináns
+				
+	CheckXend:		
+				ld	a,(x1_var)
+				ld	b,a
+				ld	a,(x2_var)
+				cp	b
+				jp	z,LineDone		; ha X-ek egyeznek, kész
+				jp	ContinueLoop
+				
+	CheckYend:		
+				ld	a,(y1_var)
+				ld	b,a
+				ld	a,(y2_var)
+				cp	b
+				jp	z,LineDone		; ha Y-ok egyeznek, kész
+	ContinueLoop		
+; e2 = 2*err
+				ld	a,(err_var)
+				ld	l,a
+				ld	h,0
+				add	hl,hl
+				ld	b,h
+				ld	c,l
+				
+; ha e2 > -dy akkor
+				ld	a,(dy_var)
+				ld	e,a
+				ld	d,0
+				ld	a,h
+				sub	d			; itt nézd át, a Z80 nincs 16 bites összehasonlítás, majd javítjuk
+; egyszerűbb, ha 8 bites verziót használunk (itt majd optimalizálás)
+				
+; X lépés
+				ld	a,(sx_var)
+				ld	b,a
+				ld	a,(x1_var)
+				add	a,b
+				ld	(x1_var),a
+				
+; Y lépés
+				ld	a,(sy_var)
+				ld	b,a
+				ld	a,(y1_var)
+				add	a,b
+				ld	(y1_var),a
+				
+				jp	LineLoop
+				
+	LineDone:		
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------  				
+; FAST_LINE_DRAW_STEP (Feltétel: x1<x2, y1<y2 (balról jobbra, fentről lefelé))
+				
+	FAST_LINE_DRAW_STEP:	
+				ld	a,(x1_var)		; dx = x1 - x2  (pozitív, mert x1<x2)
+				ld	b,a
+				ld	a,(x2_var)
+				sub	b
+				ld	(dx_var),a
+				ld	a,(y1_var)		; dy = y1 - y2  (pozitív, mert y2<y1)
+				ld	b,a
+				ld	a,(y2_var)
+				sub	b
+				ld	(dy_var),a
+; SX kiszámítása (±1)
+				ld	a,(x2_var)
+				ld	b,a
+				ld	a,(x1_var)
+				cp	b
+				jp	c,SX_Pos		; ha x1<x2 › jobbra (+1)
+				ld	hl,-1
+				ld	(sx_var),hl
+				
+				
+				jp	SX_Store2
+	SX_Pos:			ld	hl,1
+				ld	(sx_var),hl
+	SX_Store2:		
+; SY kiszámítása (±64)
+				ld	a,(y2_var)
+				ld	b,a
+				ld	a,(y1_var)
+				cp	b
+				jp	c,SY_Pos		; ha y1<y2 › lefelé (+64)
+				ld	hl,-64
+				ld	(sy_var),hl
+				jp	SY_Store2
+	SY_Pos:			ld	hl,64
+				ld	(sy_var),hl
+	SY_Store2:		
+; err = dx - dy (signed 16-bit)
+				ld	a,(dx_var)
+				ld	l,a
+				ld	h,0
+				ld	a,(dy_var)
+				ld	e,a
+				ld	d,0
+				xor	a			; C=0
+				sbc	hl,de
+				ld	(err_w),hl
+				
+; Kezdő VRAM cím: HL = $8000 + y1*64 + x1
+				ld	a,(y1_var)
+				ld	l,a
+				ld	h,0
+				add	hl,hl			; *2
+				add	hl,hl			; *4
+				add	hl,hl			; *8
+				add	hl,hl			; *16
+				add	hl,hl			; *32
+				add	hl,hl			; *64
+				ld	a,(x1_var)
+				ld	e,a
+				ld	d,$80
+				add	hl,de
+				ld	(cur_pos),hl		; eltesszük a címünket
+				
+;----------------- fő ciklus -----------------
+	LD1_Loop:		
+    ; HL = aktuális cím
+				ld	hl,(cur_pos)
+				set	7,H			; keep it $8000-$BFFF
+				res	6,H
+				ld	a,(hl)
+	FL_COLOR:		xor	$F0
+				ld	(hl),a			; pixel kirakása
+	CODE_MODIFIED:		jr	FIRST_CONT
+				ld	d,a
+				ld	b,h
+				ld	c,l
+				ld	hl,$c000-1
+				xor	a
+				sbc	hl,bc
+				set	7,H			; keep it $8000-$BFFF
+				res	6,H
+				ld	a,d
+				ld	(hl),a
+				
+    ; KILÉPÉS ? feltétellel (már kiraktuk a pixelt!)
+	FIRST_CONT		ld	a,(x2_var)
+				ld	b,a
+				ld	a,(x1_var)
+				cp	b
+				jp	c,LD1_Step		; ha x1 < x2 › még nincs vége
+				ld	a,(y2_var)
+				ld	b,a
+				ld	a,(y1_var)
+				cp	b
+				jp	nc,LD1_Done		; ha x1 ? x2 ÉS y1 ? y2 › kész
+    ; különben y1 < y2, lépünk tovább
+				
+	LD1_Step:		
+				
+    ; ---- e2 = 2*err, X-lépés vizsgálata: (e2 + dy) >= 0 ? ----
+				ld	hl,(err_w)
+				xor	a
+				adc	hl,hl			; HL = 2*err   (S/Z érvényes)
+				ld	a,(dy_var)
+				ld	e,a
+				ld	d,0
+				xor	a
+				adc	hl,de			; HL = 2*err + dy  (S/Z érvényes)
+				jp	m,LD1_NoX		; ha negatív › nincs X-lépés
+				
+    ; X-lépés: cím +1, x1++
+				ld	hl,(sx_var)		; get X increment +1 or -1
+				ex	de,hl
+				ld	hl,(cur_pos)
+				add	hl,de			; increment: +-1
+				
+				ld	(cur_pos),hl
+				ld	a,(x1_var)
+				inc	a
+				ld	(x1_var),a
+				
+    ; err -= dy
+				ld	hl,(err_w)
+				ld	a,(dy_var)
+				ld	e,a
+				ld	d,0
+				xor	a
+				sbc	hl,de
+				ld	(err_w),hl
+	LD1_NoX:		
+				
+    ; ---- e2 = 2*err, Y-lépés vizsgálata: (e2 - dx) < 0 ? ----
+				ld	hl,(err_w)
+				xor	a
+				adc	hl,hl			; HL = 2*err
+				ld	a,(dx_var)
+				ld	e,a
+				ld	d,0
+				xor	a
+				sbc	hl,de			; HL = 2*err - dx   (S/Z érvényes)
+				jp	p,LD1_NoY		; ha ?0 › nincs Y-lépés
+				
+    ; Y-lépés: cím +64, y1++
+				ld	hl,(sy_var)		; get Y increment: +64 or -64
+				ex	de,hl
+				ld	hl,(cur_pos)
+				add	hl,de			; +-64				
+				ld	(cur_pos),hl
+				ld	a,(y1_var)
+				inc	a
+				ld	(y1_var),a
+				
+    ; err += dx
+				ld	hl,(err_w)
+				ld	a,(dx_var)
+				ld	e,a
+				ld	d,0
+				add	hl,de
+				ld	(err_w),hl
+	LD1_NoY:		
+				
+				jp	LD1_Loop
+				
+	LD1_Done:		
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------  
+; PLASMA
+				
+	sin:			db	$3f, $40, $42, $43, $45, $46, $48, $49
+				db	$4b, $4c, $4e, $4f, $51, $52, $54, $55
+				db	$57, $58, $59, $5b, $5c, $5e, $5f, $60
+				db	$62, $63, $64, $65, $66, $68, $69, $6a
+				db	$6b, $6c, $6d, $6e, $6f, $70, $71, $72
+				db	$73, $74, $75, $75, $76, $77, $77, $78
+				db	$79, $79, $7a, $7a, $7b, $7b, $7c, $7c
+				db	$7c, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7e, $7d, $7d, $7d, $7d, $7d, $7d, $7d
+				db	$7c, $7c, $7c, $7b, $7b, $7a, $7a, $79
+				db	$79, $78, $77, $77, $76, $75, $75, $74
+				db	$73, $72, $71, $70, $6f, $6e, $6d, $6c
+				db	$6b, $6a, $69, $68, $66, $65, $64, $63
+				db	$62, $60, $5f, $5e, $5c, $5b, $59, $58
+				db	$57, $55, $54, $52, $51, $4f, $4e, $4c
+				db	$4b, $49, $48, $46, $45, $43, $42, $40
+				db	$3f, $3d, $3b, $3a, $38, $37, $35, $34
+				db	$32, $31, $2f, $2e, $2c, $2b, $29, $28
+				db	$26, $25, $24, $22, $21, $1f, $1e, $1d
+				db	$1b, $1a, $19, $18, $17, $15, $14, $13
+				db	$12, $11, $10, $0f, $0e, $0d, $0c, $0b
+				db	$0a, $09, $08, $08, $07, $06, $06, $05
+				db	$04, $04, $03, $03, $02, $02, $01, $01
+				db	$01, $00, $00, $00, $00, $00, $00, $00
+				db	$00, $00, $00, $00, $00, $00, $00, $00
+				db	$01, $01, $01, $02, $02, $03, $03, $04
+				db	$04, $05, $06, $06, $07, $08, $08, $09
+				db	$0a, $0b, $0c, $0d, $0e, $0f, $10, $11
+				db	$12, $13, $14, $15, $17, $18, $19, $1a
+				db	$1b, $1d, $1e, $1f, $21, $22, $24, $25
+				db	$26, $28, $29, $2b, $2c, $2e, $2f, $31
+				db	$32, $34, $35, $37, $38, $3a, $3b, $3d
+				
+	val:			db	0
+	c2x:			db	0
+	c2y:			db	0
+	ax:			db	0
+	ay:			db	0
+	time:			db	0
+	time2:			db	0
+	x:			db	0
+	y:			db	0
+	shift:			db	0
+	dst:			dw	0
+	siny			equ	$7f00
+	sinx			equ	$7e00
+	plasma_shift:		db	$0
+				
+; // Plasma procedure
+	; ***********  Defining procedure : Calculate
+	;    Procedure type : User-defined procedure
+	Calculate:		
+	; generic assign 
+				ld	a,(ax)
+				ld	(c2x),a
+	; generic assign 
+				ld	a,(ay)
+				ld	(c2y),a
+				ld	a,$0
+				ld	(x),a
+	Calculate_forloop22:	
+				
+; // Set up y-sine table
+	; Storing to array  
+				ld	a,(c2x)
+				ld	e,a			; variable is 8-bit
+				ld	d,0			;keep
+				ld	hl,sin
+				add	hl,de
+	; TYPETEST : BYTE  WriteType : NADA
+				ld	a,(hl)
+				push	af
+				ld	a,(c2y)
+				ld	e,a			; variable is 8-bit
+				ld	d,0			;keep
+				ld	hl,sin
+				add	hl,de
+	; TYPETEST : BYTE  WriteType : NADA
+				ld	a,(hl)
+				ld	b,a
+				pop	af
+				add	a,b
+				push	af
+				ld	a,(time2)
+				ld	b,a
+				pop	af
+				sub	b
+				push	af
+				ld	a,(x)
+				ld	e,a
+				ld	d,0
+				ld	hl,siny
+				add	hl,de
+				pop	af
+				ld	(hl),a
+	; generic assign 
+	; RHS is pure numeric optimisation
+				ld	a,(c2x)
+				add	a,$2
+				push	af
+				ld	a,(plasma_shift)
+				ld	b,a
+				pop	af
+				add	a,b
+				ld	(c2x),a
+	; generic assign 
+	; RHS is pure numeric optimisation
+				ld	a,(c2y)
+				add	a,$5
+				push	af
+				ld	a,(plasma_shift)
+				ld	b,a
+				pop	af
+				add	a,b
+				ld	(c2y),a
+	Calculate_loopstart23:	
+				ld	a,(x)
+				add	a,1
+				ld	(x),a
+				cp	$20
+				jr	nz,Calculate_forloop22
+	Calculate_loopend24:	
+	; 'a:=a + const'  optimization 
+				ld	a,(ax)
+				add	a,$2
+				ld	(ax),a
+	; 'a:=a + const'  optimization 
+				ld	a,(ay)
+				sub	$3
+				ld	(ay),a
+				ld	a,$0
+				ld	(x),a
+	Calculate_forloop27:	
+				
+; // Set up x-sine table
+	; Storing to array  
+				ld	a,(c2x)
+				ld	e,a			; variable is 8-bit
+				ld	d,0			;keep
+				ld	hl,sin
+				add	hl,de
+	; TYPETEST : BYTE  WriteType : NADA
+				ld	a,(hl)
+				push	af
+				ld	a,(c2y)
+				ld	e,a			; variable is 8-bit
+				ld	d,0			;keep
+				ld	hl,sin
+				add	hl,de
+	; TYPETEST : BYTE  WriteType : NADA
+				ld	a,(hl)
+				ld	b,a
+				pop	af
+				add	a,b
+				push	af
+				ld	a,(x)
+				ld	e,a
+				ld	d,0
+				ld	hl,sinx
+				add	hl,de
+				pop	af
+				ld	(hl),a
+	; generic assign 
+	; RHS is pure numeric optimisation
+				ld	a,(c2x)
+				add	a,$3
+				push	af
+				ld	a,(plasma_shift)
+				ld	b,a
+				pop	af
+				add	a,b
+				ld	(c2x),a
+	; generic assign 
+	; RHS is pure numeric optimisation
+				ld	a,(c2y)
+				add	a,$7
+				push	af
+				ld	a,(plasma_shift)
+				ld	b,a
+				pop	af
+				add	a,b
+				ld	(c2y),a
+	Calculate_loopstart28:	
+				ld	a,(x)
+				add	a,1
+				ld	(x),a
+				cp	$40
+				jr	nz,Calculate_forloop27
+	Calculate_loopend29:	
+				
+; // alternate every 2nd line
+				ld	a,(shift)
+				ld	l,a
+				ld	h,0
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				add	hl,hl
+				ex	de,hl
+				ld	hl,$8003 + $0000
+				add	hl,de
+	; Store 16-bit address
+				ld	(dst),hl
+				ret
+	end_procedure_Calculate:	
+	; ***********  Defining procedure : Plasma
+	;    Procedure type : User-defined procedure
+	Plasma:			
+				ld	a,$0
+				ld	(y),a
+	Plasma_forloop33:	
+	; generic assign 
+				ld	a,(y)
+				ld	e,a			; variable is 8-bit
+				ld	d,0			;keep
+				ld	hl,siny
+				add	hl,de
+	; TYPETEST : BYTE  WriteType : NADA
+				ld	a,(hl)
+				ld	(val),a
+				ld	de,(dst)
+				ld	a,(val)
+				ld	b,a
+				
+				ld	hl,sinx + 0
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 2
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 4
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 6
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 8
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 10
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 12
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 14
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 16
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 18
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 20
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 22
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 24
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 26
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 28
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 30
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 32
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 34
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 36
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 38
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 40
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 42
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 44
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 46
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 48
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 50
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 52
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 54
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				ld	hl,sinx + 56
+				ld	a,b			; a = val
+				add	a,(hl)			; a+ sinx(x)
+				ld	hl,data			; lookup table data ( ...)
+				ld	l,a			; +data(a)			
+				ldi				; ld (de),(hl), inc de
+				inc	hl
+				inc	de
+				
+	; ;generic pointer/integer P:=P+(expr) add expression
+	; RHS is pure 
+	; RHS is pure constant of $100
+				ld	b,$02
+				ld	a,(dst+1)
+				add	a,b
+				ld	(dst+1),a
+	Plasma_loopstart34:	
+				ld	a,(y)
+				add	a,1
+				ld	(y),a
+				cp	$20
+				jp	nz,Plasma_forloop33
+	Plasma_loopend35:	
+				ret
+	end_procedure_Plasma:	
+				
+; ------------------------------------------------------------
+	DEMO_START:		
+				call	RandomNumber64
+				ld	(x1_var),a
+				call	RandomNumber240
+				ld	(y1_var),a
+				call	RandomNumber64
+				ld	(x2_var),a
+				call	RandomNumber240
+				ld	(y2_var),a
+				
+				call	LINE_DRAW_V1		; vonal kirajzolás
+				
+	ds_cnt:			ld	hl,1200
+				dec	hl
+				ld	(ds_cnt+1),hl
+				ld	a,h
+				or	l
+				jp	nz,DEMO_START
+				
+				ld	hl,1200			; re init counter
+				ld	(ds_cnt+1),hl
+				ret
+				
+; ------------------------------------------------------------
+	DEMO_TOAD:		call	Calculate
+	; 'a:=a + const'  optimization 
+				ld	a,(time2)
+				add	a,$5
+				ld	(time2),a
+	; 'a:=a + const'  optimization 
+				
+				add	a,$1
+				ld	(time),a
+	; generic assign 
+	; RHS is pure numeric optimisation
+				ld	a,(time)
+				and	$3
+				ld	(shift),a
+				call	Plasma
+				
+	ds_cnt2:		ld	hl,200
+				dec	hl
+				ld	(ds_cnt2+1),hl
+				ld	a,h
+				or	l
+				jp	nz,DEMO_TOAD
+				
+				ld	hl,50			; re init counter for last SCENE
+				ld	(ds_cnt2+1),hl
+				ret
+						
+; ------------------------------------------------------------
+	LINES_DEMO1:		call	xrnd
+				ld	a,h
+				and	63
+				ld	(x1_var),a		;X1
+				ld	a,l
+				and	63
+				ld	(x2_var),a		;X2
+				call	xrnd
+				ld	a,h
+				and	255
+				ld	(y1_var),a		;Y1
+				ld	a,l
+				and	255
+				ld	(y2_var),a		;Y2
+				
+	lide4:			call	FAST_LINE_DRAW_STEP
+				
+	lide_cnt:		ld	hl,380
+				dec	hl
+				ld	(lide_cnt+1),hl
+				ld	a,h
+				or	l
+				jp	nz,LINES_DEMO1
+				
+				ret
+				
+; ------------------------------------------------------------				
+	KALEIDOSCOPE:		xor	a
+				ld	(CODE_MODIFIED+1),a	; modify code to make a mirror effect on fast line drawing	
+; NEXT STEP				
+	kl_next2		ld	a,0
+				ld	(x1_var),a
+	y1_mov			ld	a,0
+				ld	(y1_var),a
+				ld	a,63
+				ld	(x2_var),a
+	y2_mov			ld	a,239
+				ld	(y2_var),a
+				
+	color_cnt		ld	a,$ff			;r			; set up kaleidoscope color
+				ld	(FL_COLOR+1),a
+				inc	a
+				ld	(color_cnt+1),a
+				call	FAST_LINE_DRAW_STEP
+; alter				
+				ld	a,(y2_mov+1)
+				dec	a
+				dec	a
+				dec	a
+				dec	a
+				ld	(y2_mov+1),a
+; loop
+	x3_cnt			ld	a,59
+				dec	a
+				ld	(x3_cnt+1),a
+				jp	nz,kl_next2
+				
+				ld	a,(y1_mov+1)
+				inc	a
+				ld	(y1_mov+1),a
+				ld	a,59			; restor inner loop counter
+				ld	(x3_cnt+1),a
+				ld	a,239
+				ld	(y2_mov+1),a
+				
+	kcik			ld	a,7
+				dec	a
+				ld	(kcik+1),a
+				jp	nz,kl_next2
+				
+				ret
+				
+				
+				
+; ------------------------------------------------------------
+; Random number generators
+; ------------------------------------------------------------
+	RandomSeed:		db	1			; kezdeti seed != 0
+				
+	RandomNumber64:						; kezdeti seed != 0		
+				ld	a,(RandomSeed)
+				ld	b,a			; B = előző érték
+				ld	a,r
+				xor	b			; keverjük az R-el
+				rrca				; forgatás
+				xor	b			; még egy keverés
+				ld	(RandomSeed),a
+				and	63			; 0..63 tartomány
+				ret				; terminátor
+				
+	RandomNumber240:					; kezdeti seed != 0
+				ld	a,(RandomSeed)
+				ld	b,a			; B = előző érték
+				ld	a,r
+				xor	b			; keverjük az R-el
+				rrca				; forgatás
+				xor	b			; még egy keverés
+				ld	(RandomSeed),a
+				and	239			; 0..239 tartomány
+				ret				; terminátor
+				
+	RandomNumber50:						; kezdeti seed != 0
+				ld	a,(RandomSeed)
+				ld	b,a			; B = előző érték
+				ld	a,r
+				xor	b			; keverjük az R-el
+				rrca				; forgatás
+				xor	b			; még egy keverés
+				ld	(RandomSeed),a
+				and	49			; 0..49 tartomány
+				ret				; terminátor
+				
+	xrnd:			
+				ld	hl,42			; seed must not be 0
+				ld	a,h
+				rra
+				ld	a,l
+				rra
+				xor	h
+				ld	h,a
+				ld	a,l
+				rra
+				ld	a,h
+				rra
+				xor	l
+				ld	l,a
+				xor	h
+				ld	h,a
+				ld	(xrnd+1),hl
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   				
+	NOISE_GENERATOR:	
+	wn_main:		call	xrnd
+				ld	a,12			; random video memory start address
+				out	(112),a
+				ld	a,h
+				and	16
+				out	(113),a
+				ld	a,13
+				out	(112),a
+				inc	de
+				ld	a,l
+				out	(113),a
+				
+	wn_downcounter:		ld	hl,27500		; length of the white noise ending
+				dec	hl
+				ld	(wn_downcounter+1),hl
+				ld	a,h
+				or	l
+				halt
+				jp	nz,wn_main
+				
+	wn_finish:		ld	a,12			; restore CRTC
+				out	(112),a
+				xor	a
+				out	(113),a
+				ld	a,13
+				out	(112),a
+				xor	a
+				out	(113),a
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di    ; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS1		; no more bits left?
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jp	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2EV		; no more bits left?
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS2OD		; no more bits left?
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jp	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jp	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS5		; no more bits left?
+				ccf
+				jp	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jp	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jp	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jp	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jp	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jp	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jp	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jp	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jp	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jp	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jp	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				ret
+				
+; definition of music data record elements
+; musical sounds C1-C8	
+				
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	64
+	E6			equ	65
+	F6			equ	66
+	FISZ6			equ	67
+	G6			equ	68
+	GISZ6			equ	69
+	A6			equ	70
+	AISZ6			equ	71
+	B6			equ	72
+				
+	C7			equ	73
+	CISZ7			equ	74
+	D7			equ	75
+	DISZ7			equ	76
+	E7			equ	77
+	F7			equ	78
+	FISZ7			equ	79
+	G7			equ	80
+	GISZ7			equ	81
+	A7			equ	82
+	AISZ7			equ	83
+	B7			equ	84
+				
+	C8			equ	85
+				
+; definition of control codes	
+	MUTE			equ	86			; 0 Hz	channel is muted
+	SKIP			equ	$fe			; channel is skipped (previous sound continues)
+				
+	FRQINC00		equ	87			; increase freq const by 256
+	FRQINC01		equ	88			; increase freq const by 16
+	FRQINC02		equ	89			; increase freq const by 32
+	FRQINC03		equ	90			; increase freq const by 48
+	FRQINC04		equ	91			; increase freq const by 64
+	FRQINC05		equ	92			; increase freq const by 80
+	FRQINC06		equ	93			; increase freq const by 96
+	FRQINC07		equ	94			; increase freq const by 112
+	FRQINC08		equ	95			; increase freq const by 128
+	FRQINC09		equ	96			; increase freq const by 144
+	FRQINC0A		equ	97			; increase freq const by 160
+	FRQINC0B		equ	98			; increase freq const by 176
+	FRQINC0C		equ	99			; increase freq const by 192
+	FRQINC0D		equ	100			; increase freq const by 208
+	FRQINC0E		equ	101			; increase freq const by 224
+	FRQINC0F		equ	102			; increase freq const by 240					
+				
+	FRQDEC00		equ	103			; decrease freq const by 256
+	FRQDEC01		equ	104			; decrease freq const by 16
+	FRQDEC02		equ	105			; decrease freq const by 32
+	FRQDEC03		equ	106			; decrease freq const by 48
+	FRQDEC04		equ	107			; decrease freq const by 64
+	FRQDEC05		equ	108			; decrease freq const by 80
+	FRQDEC06		equ	109			; decrease freq const by 96
+	FRQDEC07		equ	110			; decrease freq const by 112
+	FRQDEC08		equ	111			; decrease freq const by 128
+	FRQDEC09		equ	112			; decrease freq const by 144
+	FRQDEC0A		equ	113			; decrease freq const by 160
+	FRQDEC0B		equ	114			; decrease freq const by 176
+	FRQDEC0C		equ	115			; decrease freq const by 192
+	FRQDEC0D		equ	116			; decrease freq const by 208
+	FRQDEC0E		equ	117			; decrease freq const by 224
+	FRQDEC0F		equ	118			; decrease freq const by 240
+				
+	ADSR00			equ	119			; volume ADSR 0 
+	ADSR01			equ	120			; volume ADSR 1	
+	ADSR02			equ	121			; volume ADSR 2
+	ADSR03			equ	122			; volume ADSR 3
+	ADSR04			equ	123			; volume ADSR 4
+	ADSR05			equ	124			; volume ADSR 5
+	ADSR06			equ	125			; volume ADSR 6
+	ADSR07			equ	126			; volume ADSR 7
+	ADSR08			equ	127			; volume ADSR 8
+	ADSR09			equ	128			; volume ADSR 9
+	ADSR0A			equ	129			; volume ADSR 10
+	ADSR0B			equ	130			; volume ADSR 11
+	ADSR0C			equ	131			; volume ADSR 12
+	ADSR0D			equ	132			; volume ADSR 13
+	ADSR0E			equ	133			; volume ADSR 14
+	ADSR0F			equ	134			; volume ADSR 15
+				
+	WAVE01			equ	135			; sqaure waveform
+	WAVE02			equ	136			; triangle waveform
+	WAVE03			equ	137			; sawtooth waveform
+	WAVE04			equ	138			; noise waveform
+				
+	LOOP			equ	$ff			; loop entire music
+				
+; MUSIC DATA RECORDS
+				
+	EMUSIC_DATA_ZX7		incbin	"Happy_Birthday.sid.bin.zx7"
+	IMUSIC_DATA_ZX7		incbin	"Outro.sid.bin.zx7"
+	MUSIC_DATA_ZX7		incbin	"Classical.sid.bin.zx7"
+				
+	PIC_END_ZX7		incbin	"pic_end.bin.zx7"
+	PIC_TVC40_ZX7		incbin	"pic_tvc40_faf.bin.zx7"
+	PIC_NOAI_ZX7		incbin	"pic_no_ai.bin.zx7"
+	PIC_TOAD_ZX7		incbin	"pic_toad.bin.zx7"
+	PIC_TITLE_ZX7		incbin	"pic_title.bin.zx7"
+				
+				
+	ADJ_BYTE:		nop
+				
+				org	$7D00
+	data:			
+				incbin	"smooth_data.bin"
+				
+	LAST_BYTE		nop
+				
+				end

@@ -1,0 +1,11 @@
+# Operációs rendszer / editor hulladék
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Átmeneti build- és debug-fájlok (a .cas / .bin / .zx7 assetek NEM ide tartoznak!)
+*.lst
+*.sym
+*.map
+*.bak
+~$*

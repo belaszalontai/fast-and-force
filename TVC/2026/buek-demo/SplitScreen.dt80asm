@@ -1,0 +1,840 @@
+				org	6639			;A program kezdőcíme
+				
+				db	$0F,$0A,0,$DD
+				db	' USR'
+				db	$96,'6659'
+				db	$95,$FF,0,0,0,0,0	; 20 byte-os fej		
+				jp	Main
+				
+;----------------------------------------------------------------------------------------------------------------------------------				
+	changeFlg		db	055h
+				
+				; A crtcData tömb 2x8 byte-ból áll
+				;-----------------------------
+				; SPLIT 1
+				;-----------------------------
+	crtcData1		
+	cur_pos2		dw	4*256			; cursor pozíció
+				db	7			; R4: 7
+				db	0			; R5: 0
+				db	8			; R6: 8		-> 8*4 = 32 sor
+				db	255			; R7: 255	-> disable VSYNC
+				db	0,0			; Üres 0 byte-ok, hogy meg legyen a teljes 8 byte-os tömb
+				
+				;-----------------------------
+				; SPLIT 2
+				;-----------------------------
+	crtcData2		
+	cur_pos1		dw	0			; cursor pozíció
+				db	70			; R4: 70
+				db	2			; R5: 2
+				db	42			; R6: 52	-> 42*4 = 208 sor
+				db	48 +6			; R7: 58
+				db	0,0			; Üres 0 byte-ok, hogy meg legyen a teljes 8 byte-os tömb
+				
+	irqSave1		db	0
+	irqSave2		dw	0
+				
+	Irq			
+				push	af
+				push	bc
+				push	hl
+				
+				out	(7),a			;interrupt flag torlese
+				ld	c,$71
+				ld	hl,changeFlg
+				rrc	(hl)
+				jp	c,@SPLIT2
+				
+				
+	@SPLIT1			ld	a,12			; video memória kezdőcím HIGH byte
+				out	($70),a			; R12
+	vid_pos2_H		ld	a,0			; ITT ÁLLÍTJUK BE A SPLIT 2 JÖVENDŐBELI VIDEO CÍMÉT !!!!
+				out	($71),a
+				ld	a,13			; video memória kezdőcím LOW byte
+				out	($70),a			; R13
+	vid_pos2_L		ld	a,0
+				out	($71),a
+				
+				ld	hl,crtcData1
+				; Beállítjuk a táblázat első word-jéből a cursor pozíciót a kovetkező raster megszakítás pozícionálásához
+				ld	a,15			; kovetkezo megszakitas cim a 6845-be
+				out	($70),a			; CURSOR LOW address
+				outi				; cursor cim also
+				dec	a			; R14
+				out	($70),a			; CURSOR HIGH address
+				outi				; cursor cim felso	
+				; CRTC R4 a következő táblázat elem. 
+				ld	a,4
+				out	($70),a			; R4
+				outi
+				; CRTC R5 a következő táblázat elem. 
+				inc	a			; R5
+				out	($70),a
+				outi
+				; CRTC R6 a következő táblázat elem. 
+				inc	a			; R6
+				out	($70),a
+				outi
+				; CRTC R7 a következő táblázat elem. 
+				inc	a			; R7
+				out	($70),a
+				outi
+				
+	v_sc_cnt		ld	a,4
+				dec	a
+				ld	(v_sc_cnt+1),a
+				jp	nz,@endirq
+				ld	a,4
+				ld	(v_sc_cnt+1),a
+
+	scroll_direction2	ld	A,0					; VERTICAL SCROLL on SPLIT 1
+				or	a
+				jp	nZ,@right2
+				
+				ld	bc,64			; increment characters for vertical scroll
+				ld	hl,(vid_pos1)
+				add	hl,bc
+				ld	a,h
+				cp	$02
+				jp	nz,@sd12
+				ld	(scroll_direction2+1),a
+				jp	@endirq
+
+	@sd12			ld	(vid_pos1),hl
+				ld	a,h
+				ld	(vid_pos1_H+1),a
+				inc	a
+				ld	(cur_pos1+1),a
+				ld	a,l
+				ld	(vid_pos1_L+1),a
+				ld	(cur_pos1),a
+				jp	@endirq
+								
+	@right2			ld	bc,65536-64		; decrement characters for vertical scroll
+				ld	hl,(vid_pos1)
+				add	hl,bc
+				ld	a,h
+				cp	$00
+				jp	nz,@sd22
+				xor	a
+				ld	(scroll_direction2+1),a
+				jp	@endirq
+
+	@sd22			ld	(vid_pos1),hl
+				ld	a,h
+				ld	(vid_pos1_H+1),a
+				inc	a
+				ld	(cur_pos1+1),a
+				ld	a,l
+				ld	(vid_pos1_L+1),a
+				ld	(cur_pos1),a
+				
+				pop	hl
+				pop	bc
+				pop	af
+				ei
+				ret
+				
+				
+	@SPLIT2			ld	a,12			; video memória kezdőcím HIGH byte
+				out	($70),a			; R12
+	vid_pos1_H		ld	a,0			; ; ITT ÁLLÍTJUK BE A SPLIT 1 JÖVENDŐBELI VIDEO CÍMÉT !!!!
+				out	($71),a
+				ld	a,13			; video memória kezdőcím LOW byte
+				out	($70),a			; R13
+	vid_pos1_L		ld	a,0
+				out	($71),a
+				
+				ld	hl,crtcData2
+				; Beállítjuk a táblázat első word-jéből a cursor pozíciót a kovetkező raster megszakítás pozícionálásához
+				ld	a,15			; kovetkezo megszakitas cim a 6845-be
+				out	($70),a			; CURSOR LOW address
+				outi				; cursor cim also
+				dec	a			; R14
+				out	($70),a			; CURSOR HIGH address
+				outi				; cursor cim felso	
+				; CRTC R4 a következő táblázat elem. 
+				ld	a,4
+				out	($70),a			; R4
+				outi
+				; CRTC R5 a következő táblázat elem. 
+				inc	a			; R5
+				out	($70),a
+				outi
+				; CRTC R6 a következő táblázat elem. 
+				inc	a			; R6
+				out	($70),a
+				outi
+				; CRTC R7 a következő táblázat elem. 
+				inc	a			; R7
+				out	($70),a
+				outi
+				
+				
+	scroll_direction	ld	A,0					; HORIZONTAL SCROLL on SPLIT 2
+				or	a
+				jp	nZ,@right
+				
+				ld	hl,(vid_pos2)
+				inc	hl
+				ld	a,l
+				cp	$40 + 23
+				jp	nz,@sd1
+				ld	(scroll_direction+1),a
+				jp	@endirq
+
+	@sd1			ld	(vid_pos2),hl
+				ld	a,h
+				ld	(vid_pos2_H+1),a
+				inc	a
+				ld	(cur_pos2+1),a
+				ld	a,l
+				ld	(vid_pos2_L+1),a
+				ld	(cur_pos2),a
+				jp	@endirq
+								
+	@right			ld	hl,(vid_pos2)
+				dec	hl
+				ld	a,l
+				cp	$29
+				jp	nz,@sd2
+				xor	a
+				ld	(scroll_direction+1),a
+				jp	@endirq
+
+	@sd2			ld	(vid_pos2),hl
+				ld	a,h
+				ld	(vid_pos2_H+1),a
+				inc	a
+				ld	(cur_pos2+1),a
+				ld	a,l
+				ld	(vid_pos2_L+1),a
+				ld	(cur_pos2),a
+
+	@endirq			pop	hl
+				pop	bc
+				pop	af
+				ei
+				ret
+				
+				
+	vid_pos1		dw	$0000
+	vid_pos2		dw	$0440
+				
+	Main			
+				ld	C,$02			; C = Graphics 16    
+				rst	$30			; $30 system call                              
+				db	$4			; set VMODE                                                            
+				ld	A,0
+				ld	(0),A			; keret színének beállítása
+; init main screen			
+				di				; IT disabled
+				ld	A,$90			; lapozási kód: U0, U1, VID, U3
+				out	($02),a			; Belapozás
+; draw main picture							
+				ld	HL,PIC_COLORS_ZX7	; HL-be a tömörített kezdőképernyő memóriacíme                                                                
+				ld	DE,$8000		; DE-be a célmemória címe
+				call	ZX7_DECOMPRESS		; Kép kitmörítése
+				
+				ld	a,($38)			; SAVE IRQ handler address
+				ld	(irqSave1),a
+				ld	hl,($39)
+				ld	(irqSave2),hl
+				
+				ei
+				halt				; még a gyári IRQ-val a képernyő alján vagyunk
+				di
+				
+				ld	a,$c3			; SET UP new IRQ handler
+				ld	($38),a
+				ld	hl,Irq
+				ld	($39),hl
+				
+				ld	hl,(vid_pos2)
+				ld	a,h
+				ld	(vid_pos2_H+1),a
+				ld	(cur_pos2+1),a
+				ld	a,l
+				ld	(vid_pos2_L+1),a
+				inc	a
+				ld	(cur_pos2),a
+				
+				ei				; innentől már a SPLIT-es megszakítás él
+
+				jp	START_MUSIC
+								
+	@exit			
+				di
+				ld	a,(irqSave1)
+				ld	($38),a
+				ld	hl,(irqSave2)
+				ld	($39),hl
+				ei
+				ret
+								
+;--------------------------------------------------------------------------------------------------------------------------------------                                   
+; ZX7_DECOMPRESS - HL: Compressed data, DE: Target address
+				
+	ZX7_DECOMPRESS						;di				; disable interrupts               
+	DZX7STANDARD		ld	A,$80
+	COPYBYTELOOPEV		ldi				; copy literal byte
+	MAINLOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS1		; no more bits left?
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				
+	COPYBYTELOOPOD		ldi				; copy literal byte
+	MAINLOOPOD		add	A,A			; check next bit
+				jr	NC,COPYBYTELOOPEV	; next bit indicates either literal or sequence
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTEV		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPEV		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2EV		; no more bits left?
+				jr	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	               ; determine number of bits used for length (Elias gamma coding)
+	LENSIZESTARTOD		push	DE
+				ld	BC,1
+				ld	D,B
+	LENSIZELOOPOD		inc	D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS2OD		; no more bits left?
+				jr	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	               ; determine length
+	LENVALUELOOPEV		add	A,A			; check next bit
+				jr	Z,LOADBITS3EV		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITEV		; check end marker
+	LENVALUESTARTEV		dec	D
+				jr	NZ,LENVALUELOOPEV
+				inc	BC			; adjust length
+				
+				   ; determine offset                           
+	OFFSETSTARTOD		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDOD		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS4		; no more bits left?
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS5		; no more bits left?
+				ccf
+				jr	C,OFFSETENDOD
+	OFFSETINCOD		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDOD		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPOD
+				
+	LOADBITS1		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	C,LENSIZESTARTOD	; next bit indicates either literal or sequence
+				jp	COPYBYTELOOPOD
+				
+	LOADBITS2EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPEV
+				jp	LENVALUESTARTEV
+				
+	LOADBITS2OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				jr	NC,LENSIZELOOPOD
+				jp	LENVALUESTARTOD
+				
+	LOADBITS3EV		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTEV	; check end marker
+	EXITEV			pop	DE
+				;ei				; enable interrupts                                   
+				ret
+				
+	LOADBITS4		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	LOADBITS5		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				ccf
+				jr	C,OFFSETENDOD
+				jp	OFFSETINCOD
+				
+	               ; determine length
+	LENVALUELOOPOD		add	A,A			; check next bit
+				jr	Z,LOADBITS3OD		; no more bits left?
+				rl	C
+				rl	B
+				jr	C,EXITOD		; check end marker
+	LENVALUESTARTOD		dec	D
+				jr	NZ,LENVALUELOOPOD
+				inc	BC			; adjust length                              
+				
+	               ; determine offset
+	OFFSETSTARTEV		ld	E,(HL)			; load offset flag (1 bit) + offset value (7 bits)
+				inc	HL
+				sll	E			; opcode for undocumented instruction "SLL E" aka "SLS E"
+				jr	NC,OFFSETENDEV		; if offset flag is set,load 4 extra bits
+				add	A,A			; check next bit
+				jr	Z,LOADBITS6		; no more bits left?
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				jr	Z,LOADBITS7		; no more bits left?
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+	OFFSETINCEV		inc	D			; equivalent to adding 128 to DE
+	OFFSETENDEV		rr	E			; insert inverted fourth bit into E
+				
+	               ; copy previous sequence
+				ex	(SP),HL			; store source,restore destination
+				push	HL			; store destination
+				sbc	HL,DE			; HL = destination - offset - 1
+				pop	DE			; DE = destination
+				ldir
+				pop	HL			; restore source address (compressed data)
+				jp	MAINLOOPEV
+				
+	LOADBITS3OD		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	C
+				rl	B
+				jp	NC,LENVALUESTARTOD	; check end marker
+	EXITOD			pop	DE
+				;ei				; enable interrupts                                   
+				ret
+				
+	LOADBITS6		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert first bit into D
+				add	A,A			; check next bit
+				rl	D			; insert second bit into D
+				add	A,A			; check next bit
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				
+	LOADBITS7		ld	A,(HL)			; load another group of 8 bits
+				inc	HL
+				rla
+				rl	D			; insert third bit into D
+				add	A,A			; check next bit
+				ccf
+				jr	C,OFFSETENDEV
+				jp	OFFSETINCEV
+				ret
+				
+;--------------------------------------------------------------------------------------------------------------------------------------   
+				
+	START_MUSIC		xor	a
+				out	(4),a
+				out	(5),a
+				
+				ld	HL,MUSIC_DATA-1		; -1 is needed because parsing is started with inc hl
+				ld	(MUSICPOS+1),HL
+				ld	(MUSIC_RESTART+1),HL
+				ld	ix,0			; reset phase accumulator registers
+				ld	iy,0
+				ld	hl,0
+				ld	(PAC1+1),hl		; reset phase accumulator counters
+				ld	(PAC2+1),hl
+				ld	(PAC3+1),hl
+				
+;******************************************************************
+; BALANCED FIX CYCLE TIME SOUND GENERATOR + MUSIC PLAYER LOOP
+; Balanced execution time: 276 + 453 =  729 cycle 
+; Sound generator frequency: 1774080/729 cycle = 2433.58 Hz
+;
+; IX = channel 1 phase accumulator 
+; IY = channel 2 phase accumulator 
+; HL = channel 3 phase accumulator 
+;******************************************************************           
+	BALANCER		ld	b,31			; 7	BALANCED: 453 cycle
+	B_LOOP			dec	b			; 31*(4+10) = 434
+				jp	nz,B_LOOP		; 10
+				nop				; 4
+				nop				; 4
+				nop				; 4
+				
+	SOUND_GENERATOR		
+				
+; alter phase accumulator counter for channel 1
+	PAC1			ld	BC,$0000
+				add	IX,BC			; 	IX = IX + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 2
+	PAC2			ld	BC,$0000
+				add	IY,BC			; 	IY = IY + phase accumulator freq const
+				
+; alter phase accumulator counter for channel 3
+	PAC3			ld	BC,$0000
+				add	HL,BC			; 	HL = HL + phase accumulator freq const
+				
+; set mixed value for channel 1 based on pac1 msb				
+				ld	C,80h
+				ld	A,IXH
+				cp	C			; 	check highest bit of PAC1
+				sbc	A,A
+	CH1_VOLUME		and	$14	; $1C for 2 ch, $14 for 3 ch (can be: $14,$10,$0C,$08,$04,$00)			
+				
+				ld	B,A			;     	STORE CH1
+				
+; set mixed value for channel 2 based on pac2 msb				
+				ld	A,IYH
+				cp	C			; 	check highest bit of PAC2
+				sbc	A,A
+	CH2_VOLUME		and	$14
+				add	A,B			; 	MIX CH1 + CH2
+				ld	B,A			;     	STORE CH1 + CH2         
+				
+; set mixed value for channel 3 based on pac3 msb				
+				ld	A,H
+				cp	C			; 	check highest bit of PAC3
+				sbc	A,A
+	CH3_VOLUME		and	$0C
+				add	A,B			; 	MIX CH1 + CH2 + CH3
+				
+	IT_GRAPHICS_MODE	or	2			; 	must have in 4 color graphics mode (2 for 16 color mode)
+				out	(6),A			;	write to sound port		
+				
+	BPM_COUNTER		ld	a,BPM			; 10
+				dec	a			; 4
+				ld	(BPM_COUNTER+1),a	; 13
+				jp	NZ,BALANCER		; 10
+;----------------------------------------------------------------------------------------------------------------------------------------------
+; from here all cycle is need to be balanced by BALANCER
+				
+				ld	a,BPM			; 10 	reset BPM counter 
+				ld	(BPM_COUNTER+1),a	; 13
+				
+				push	HL			; 11	SAVE HL which is phase accumulator for CH3
+; parse record							
+	MUSICPOS		ld	HL,MUSIC_DATA-1		; 10
+				ld	d,$1F			; 7	high address of sound frequency constant lookup table
+	MP_CH1			inc	hl			; 6
+				ld	a,(hl)			; 7	load first byte of music record
+; check control codes for channel 1
+				cp	LOOP			; 7	first byte can be LOOP control
+				jp	nz,MP_SKIP_BALANCE	; 10
+	MUSIC_RESTART		ld	HL,MUSIC_DATA-1		; 10	reset music data pointer
+				ld	(MUSICPOS+1),HL		; 16
+				inc	hl			; 6
+				ld	a,(hl)			; 7	load first byte of music record after music restart
+				jp	MP_SKIP			; 10
+				
+; balance the previous JP NZ instruction				
+	MP_SKIP_BALANCE		jp	MP_SKIP_BAL_1		; 10	BALANCED: 10+16+6+7+10 = 49
+	MP_SKIP_BAL_1		jp	MP_SKIP_BAL_2		; 10
+	MP_SKIP_BAL_2		jp	MP_SKIP_BAL_3		; 10
+	MP_SKIP_BAL_3		ld	B,(IY+0)		; 19	no meaning just for 19 cycle
+				
+; continue processing music record				
+	MP_SKIP			cp	SKIP			; 7
+				jp	z,MP_CH2_BALANCE	; 10	SKIP -> skip channel 1
+; handle normal musical note on CH1
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table = control code * 2
+				ld	a,(de)			; 7	load frequ constant for CH1
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC1+1),BC		; 20	put into CH1 freq constant in irq handler    	
+				jp	MP_CH2			; 10
+				
+; balance the previous JP Z instruction						
+	MP_CH2_BALANCE		jp	MP_CH2_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_CH2_BAL_1		jp	MP_CH2_BAL_2		; 10
+	MP_CH2_BAL_2		jp	MP_CH2_BAL_3		; 10
+	MP_CH2_BAL_3		jp	MP_CH2_BAL_4		; 10
+	MP_CH2_BAL_4		jp	MP_CH2_BAL_5		; 10
+	MP_CH2_BAL_5		jp	MP_CH2_BAL_6		; 10
+	MP_CH2_BAL_6		jp	MP_CH2			; 10
+				
+	MP_CH2			inc	hl			; 6
+				ld	a,(hl)			; 7
+; check control codes for channel 2
+				cp	SKIP			; 7
+				jp	z,MP_CH3_BALANCE	; 10	SKIP -> skip channel 2
+; handle normal musical note on CH2
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table
+				ld	a,(de)			; 7	load frequ constant for CH2
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC2+1),BC		; 20	put into CH2 freq constant in irq handler     
+				jp	MP_CH3			; 10
+				
+; balance the previous JP Z instruction						
+	MP_CH3_BALANCE		jp	MP_CH3_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_CH3_BAL_1		jp	MP_CH3_BAL_2		; 10
+	MP_CH3_BAL_2		jp	MP_CH3_BAL_3		; 10
+	MP_CH3_BAL_3		jp	MP_CH3_BAL_4		; 10
+	MP_CH3_BAL_4		jp	MP_CH3_BAL_5		; 10
+	MP_CH3_BAL_5		jp	MP_CH3_BAL_6		; 10
+	MP_CH3_BAL_6		jp	MP_CH3			; 10				
+				
+				
+	MP_CH3			inc	hl			; 6
+				ld	a,(hl)			; 7
+; check control codes for channel 3
+				cp	SKIP			; 7
+				jp	z,MP_END_BALANCE	; 10	SKIP -> skip channel 3
+				
+; handle normal musical note on CH3
+				ld	e,a			; 4
+				sla	e			; 8	low address of sound frequency constant lookup table
+				ld	a,(de)			; 7	load frequ constant for CH3
+				inc	de			; 6
+				ld	c,a			; 4
+				ld	a,(de)			; 7
+				ld	b,a			; 4
+				ld	(PAC3+1),BC		; 20	put into CH3 freq constant in irq handler    				
+				jp	MP_END			; 10
+				
+; balance the previous JP Z instruction						
+	MP_END_BALANCE		jp	MP_END_BAL_1		; 10	BALANCED: 4+8+7+6+4+7+4+20+10 = 70
+	MP_END_BAL_1		jp	MP_END_BAL_2		; 10
+	MP_END_BAL_2		jp	MP_END_BAL_3		; 10
+	MP_END_BAL_3		jp	MP_END_BAL_4		; 10
+	MP_END_BAL_4		jp	MP_END_BAL_5		; 10
+	MP_END_BAL_5		jp	MP_END_BAL_6		; 10
+	MP_END_BAL_6		jp	MP_END			; 10	
+				
+	MP_END			ld	(MUSICPOS+1),HL		; 16
+				pop	HL			; 10
+				jp	SOUND_GENERATOR		; 10
+				
+				org	$1F00
+				; Freq divider table for musical sounds 5008Hz IRQ
+	SOUND_TABLE_5008	dw	0			; 0.00 Hz
+				dw	428			; C1	32.7 Hz
+				dw	453			; CISZ1	34.65 Hz
+				dw	480			; D1	36.71 Hz
+				dw	509			; DISZ1	38.89 Hz
+				dw	539			; E1	41.2 Hz
+				dw	571			; F1	43.65 Hz
+				dw	605			; FISZ1	46.25 Hz
+				dw	641			; G1	49 Hz
+				dw	679			; GISZ1	51.91 Hz
+				dw	720			; A1	55 Hz
+				dw	763			; AISZ1	58.27 Hz
+				dw	808			; B1	61.74 Hz
+				dw	856			; C2	65.41 Hz
+				dw	907			; CISZ2	69.3 Hz
+				dw	961			; D2	73.42 Hz
+				dw	1018			; DISZ2	77.78 Hz
+				dw	1078			; E2	82.41 Hz
+				dw	1143			; F2	87.31 Hz
+				dw	1210			; FISZ2	92.5 Hz
+				dw	1282			; G2	98 Hz
+				dw	1359			; GISZ2	103.83 Hz
+				dw	1439			; A2	110 Hz
+				dw	1525			; AISZ2	116.54 Hz
+				dw	1616			; B2	123.47 Hz
+				dw	1712			; C3	130.81 Hz
+				dw	1814			; CISZ3	138.59 Hz
+				dw	1921			; D3	146.83 Hz
+				dw	2036			; DISZ3	155.56 Hz
+				dw	2157			; E3	164.81 Hz
+				dw	2285			; F3	174.61 Hz
+				dw	2421			; FISZ3	185 Hz
+				dw	2565			; G3	196 Hz
+				dw	2717			; GISZ3	207.65 Hz
+				dw	2879			; A3	220 Hz
+				dw	3050			; AISZ3	233.08 Hz
+				dw	3232			; B3	246.94 Hz
+				dw	3424			; C4	261.63 Hz
+				dw	3627			; CISZ4	277.18 Hz
+				dw	3843			; D4	293.66 Hz
+				dw	4072			; DISZ4	311.13 Hz
+				dw	4314			; E4	329.63 Hz
+				dw	4570			; F4	349.23 Hz
+				dw	4842			; FISZ4	369.99 Hz
+				dw	5130			; G4	392 Hz
+				dw	5435			; GISZ4	415.3 Hz
+				dw	5758			; A4	440 Hz
+				dw	6100			; AISZ4	466.16 Hz
+				dw	6463			; B4	493.88 Hz
+				dw	6847			; C5	523.25 Hz
+				dw	7255			; CISZ5	554.37 Hz
+				dw	7686			; D5	587.33 Hz
+				dw	8143			; DISZ5	622.25 Hz
+				dw	8627			; E5	659.25 Hz
+				dw	9140			; F5	698.46 Hz
+				dw	9684			; FISZ5	739.99 Hz
+				dw	10259			; G5	783.99 Hz
+				dw	10870			; GISZ5	830.61 Hz
+				dw	11516			; A5	880 Hz
+				dw	12201			; AISZ5	932.33 Hz
+				dw	12926			; B5	987.77 Hz
+				dw	13695			; C6	1046.5 Hz
+				dw	14509			; CISZ6	1108.73 Hz
+				dw	15372			; D6	1174.66 Hz
+				dw	16286			; DISZ6	1244.51 Hz
+				dw	17254			; E6	1318.51 Hz
+				dw	18280			; F6	1396.91 Hz
+				dw	19367			; FISZ6	1479.98 Hz
+				dw	20519			; G6	1567.98 Hz
+				dw	21739			; GISZ6	1661.22 Hz
+				dw	23032			; A6	1760 Hz
+				dw	24401			; AISZ6	1864.66 Hz
+				dw	25852			; B6	1975.53 Hz
+				dw	27389			; C7	2093 Hz
+				dw	0			; 0 Hz	MUTE
+				
+				; definition of music data record elements
+				; musical sounds C1-C8	
+				
+	C1			equ	1
+	CISZ1			equ	2
+	D1			equ	3
+	DISZ1			equ	4
+	E1			equ	5
+	F1			equ	6
+	FISZ1			equ	7
+	G1			equ	8
+	GISZ1			equ	9
+	A1			equ	10
+	AISZ1			equ	11
+	B1			equ	12
+				
+	C2			equ	13
+	CISZ2			equ	14
+	D2			equ	15
+	DISZ2			equ	16
+	E2			equ	17
+	F2			equ	18
+	FISZ2			equ	19
+	G2			equ	20
+	GISZ2			equ	21
+	A2			equ	22
+	AISZ2			equ	23
+	B2			equ	24
+				
+	C3			equ	25
+	CISZ3			equ	26
+	D3			equ	27
+	DISZ3			equ	28
+	E3			equ	29
+	F3			equ	30
+	FISZ3			equ	31
+	G3			equ	32
+	GISZ3			equ	33
+	A3			equ	34
+	AISZ3			equ	35
+	B3			equ	36
+				
+	C4			equ	37
+	CISZ4			equ	38
+	D4			equ	39
+	DISZ4			equ	40
+	E4			equ	41
+	F4			equ	42
+	FISZ4			equ	43
+	G4			equ	44
+	GISZ4			equ	45
+	A4			equ	46
+	AISZ4			equ	47
+	B4			equ	48
+				
+	C5			equ	49
+	CISZ5			equ	50
+	D5			equ	51
+	DISZ5			equ	52
+	E5			equ	53
+	F5			equ	54
+	FISZ5			equ	55
+	G5			equ	56
+	GISZ5			equ	57
+	A5			equ	58
+	AISZ5			equ	59
+	B5			equ	60
+				
+	C6			equ	61
+	CISZ6			equ	62
+	D6			equ	63
+	DISZ6			equ	40
+	E6			equ	41			; above D6 all sound is transposed
+	F6			equ	42
+	FISZ6			equ	43
+	G6			equ	44
+	GISZ6			equ	45
+	A6			equ	46
+	AISZ6			equ	47
+	B6			equ	48
+				
+	C7			equ	49
+	CISZ7			equ	50
+	D7			equ	51
+	DISZ7			equ	52
+	E7			equ	53
+	F7			equ	54
+	FISZ7			equ	55
+	G7			equ	56
+	GISZ7			equ	57
+	A7			equ	58
+	AISZ7			equ	59
+	B7			equ	60
+				
+	C8			equ	61
+				
+	MUTE			equ	74			; 0 Hz	channel is muted			
+	SKIP			equ	$fe			; skip actual channel
+	LOOP			equ	$ff			; loop entire music			
+				
+	BPM			equ	100			; ( BPM = 49 for 50Hz SID conversions)
+				
+				
+				
+				; MUSIC DATA RECORDS
+				
+	MUSIC_DATA		#include	"Crome_vs_Turrican_2002.sid.txt"
+				
+				db	LOOP			; LOOPMUSIC 				
+				
+	PIC_COLORS_ZX7		#incbin	"out24.bin.zx7"
+				
+				
+				end
+				

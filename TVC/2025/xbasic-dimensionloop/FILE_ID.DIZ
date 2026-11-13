@@ -1,0 +1,31 @@
+  __  __       _          _   _            ____    _    ____ ___ ____ 
+ |  \/  | __ _| | _____  | |_| |__   ___  | __ )  / \  / ___|_ _/ ___|
+ | |\/| |/ _` | |/ / _ \ | __| '_ \ / _ \ |  _ \ / _ \ \___ \| | |    
+ | |  | | (_| |   <  __/ | |_| | | |  __/ | |_) / ___ \ ___) | | |___ 
+ |_|  |_|\__,_|_|\_\___|  \__|_| |_|\___| |____/_/   \_\____/___\____|
+   __ _ _ __ ___  __ _| |_    __ _  __ _  __ _(_)_ __ | |             
+  / _` | '__/ _ \/ _` | __|  / _` |/ _` |/ _` | | '_ \| |             
+ | (_| | | |  __/ (_| | |_  | (_| | (_| | (_| | | | | |_|             
+  \__, |_|  \___|\__,_|\__|  \__,_|\__, |\__,_|_|_| |_(_)             
+  |___/                            |___/                              
+  
+ Fast&Force proudly presents a game for VIDEOTON TV Computer
+  ____ ___ __  __ _____ _   _ ____ ___ ___  _   _   _     ___   ___  ____  
+ |  _ \_ _|  \/  | ____| \ | / ___|_ _/ _ \| \ | | | |   / _ \ / _ \|  _ \ 
+ | | | | || |\/| |  _| |  \| \___ \| | | | |  \| | | |  | | | | | | | |_) |
+ | |_| | || |  | | |___| |\  |___) | | |_| | |\  | | |__| |_| | |_| |  __/ 
+ |____/___|_|  |_|_____|_| \_|____/___\___/|_| \_| |_____\___/ \___/|_|    
+ dimensionloop.cas
+ 
+ 22639 byte
+ 100% PURE BASIC PROGRAM
+ NO Z80 ASSEMBLY CODE
+ NO SYSTEM CALLS
+ 2 CHANNEL CONVERTED SID MUSIC
+ HORIZONTAL HARDWARE SCROLL
+ 
+ Music 1 is converted from original SID music Asteroids by Simon Moon - 1987 Kalisti Enterprises
+ https://deepsid.chordian.net/?file=/GAMES/A-F/Asteroid_War.sid
+
+ Music 2 is converted from original SID music Super Space Invaders by Andy Taylor - 1991 Domark
+ https://deepsid.chordian.net/?file=/MUSICIANS/T/Taylor_Andy/Super_Space_Invaders.sid
